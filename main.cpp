@@ -52,7 +52,7 @@ void ListAllProcesses() {
                 std::cout << "      PID: " << processEntry.th32ProcessID 
                           << " | " << name;
                 count++;
-                if (count > 20) { // Показываем только первые 20
+                if (count > 50) { // Показываем только первые 50
                     std::cout << " ... (и еще " << (count - 20) << " процессов)";
                     break;
                 }
@@ -163,8 +163,8 @@ int main() {
     }
     
     if (pid == 0) {
-        std::cout << "   [!] Процесс notepad.exe не найден!" << std::endl;
-        std::cout << "   [!] Пожалуйста, запусти Блокнот (Пуск -> Блокнот) и попробуй снова." << std::endl;
+        std::cout << "   [!] Процесс CS2.exe не найден!" << std::endl;
+        std::cout << "   [!] Пожалуйста, запусти CS2.exe и попробуй снова." << std::endl;
         std::cout << "   Нажми Enter для выхода...";
         std::cin.get();
         return 1;
@@ -185,7 +185,8 @@ int main() {
     std::cout << "2. Открыли процесс для чтения памяти" << std::endl;
     
     // Шаг 3: Получаем базовый адрес модуля
-    std::wstring moduleName = L"notepad.exe";
+    // std::wstring moduleName = L"notepad.exe";
+    std::wstring moduleName = foundName;
     uintptr_t moduleBase = GetModuleBaseAddress(hProcess, moduleName);
     if (moduleBase == 0) {
         std::cout << "   [!] Не удалось получить базовый адрес" << std::endl;
