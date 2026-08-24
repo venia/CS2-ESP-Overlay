@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <iostream>
 #include <vector>
 #include <string>
@@ -8,6 +9,101 @@
 // ============================================
 // 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================
+
+// Получить список всех загруженных модулей процесса
+std::vector<MODULEENTRY32W> GetProcessModules(DWORD pid) {
+    std::vector<MODULEENTRY32W> modules;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W moduleEntry;
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        
+        if (Module32FirstW(snapshot, &moduleEntry)) {
+            do {
+                modules.push_back(moduleEntry);
+            } while (Module32NextW(snapshot, &moduleEntry));
+        }
+        CloseHandle(snapshot);
+    }
+    
+    return modules;
+}
+
+uintptr_t FindSignatureInRange(HANDLE process, uintptr_t startAddress, size_t size, 
+                               const std::vector<BYTE>& signature) {
+    std::vector<BYTE> buffer(size);
+    SIZE_T bytesRead;
+    
+    if (!ReadProcessMemory(process, (LPCVOID)startAddress, buffer.data(), size, &bytesRead)) {
+        return 0;
+    }
+    
+    for (size_t i = 0; i <= bytesRead - signature.size(); i++) {
+        bool found = true;
+        for (size_t j = 0; j < signature.size(); j++) {
+            if (signature[j] != 0x00 && signature[j] != buffer[i + j]) {
+                found = false;
+                break;
+            }
+        }
+        if (found) {
+            return startAddress + i;
+        }
+    }
+    
+    return 0;
+}
+
+uintptr_t FindModuleBySignature(HANDLE process, const std::vector<BYTE>& signature) {
+    DWORD pid = GetProcessId(process);
+    if (pid == 0) {
+        return 0;
+    }
+    
+    auto modules = GetProcessModules(pid);
+    
+    for (const auto& module : modules) {
+        uintptr_t moduleBase = (uintptr_t)module.modBaseAddr;
+        size_t moduleSize = module.modBaseSize;
+        
+        uintptr_t found = FindSignatureInRange(process, moduleBase, moduleSize, signature);
+        
+        if (found != 0) {
+            return found - moduleBase;
+        }
+    }
+    
+    return 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // Получить ID процесса по имени (без учета регистра)
 DWORD GetProcessIdByName(const std::wstring& processName) {
@@ -32,49 +128,49 @@ DWORD GetProcessIdByName(const std::wstring& processName) {
     return processId;
 }
 
-// Получить список всех запущенных процессов (для отладки)
-void ListAllProcesses() {
-    std::cout << "   Запущенные процессы:" << std::endl;
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+// // Получить список всех запущенных процессов (для отладки)
+// void ListAllProcesses() {
+//     std::cout << "   Запущенные процессы:" << std::endl;
+//     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     
-    if (snapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W processEntry;
-        processEntry.dwSize = sizeof(processEntry);
-        int count = 0;
+//     if (snapshot != INVALID_HANDLE_VALUE) {
+//         PROCESSENTRY32W processEntry;
+//         processEntry.dwSize = sizeof(processEntry);
+//         int count = 0;
         
-        if (Process32FirstW(snapshot, &processEntry)) {
-            do {
-                // Конвертируем wstring для вывода
-                int size_needed = WideCharToMultiByte(CP_UTF8, 0, processEntry.szExeFile, -1, NULL, 0, NULL, NULL);
-                std::string name(size_needed, 0);
-                WideCharToMultiByte(CP_UTF8, 0, processEntry.szExeFile, -1, &name[0], size_needed, NULL, NULL);
+//         if (Process32FirstW(snapshot, &processEntry)) {
+//             do {
+//                 // Конвертируем wstring для вывода
+//                 int size_needed = WideCharToMultiByte(CP_UTF8, 0, processEntry.szExeFile, -1, NULL, 0, NULL, NULL);
+//                 std::string name(size_needed, 0);
+//                 WideCharToMultiByte(CP_UTF8, 0, processEntry.szExeFile, -1, &name[0], size_needed, NULL, NULL);
                 
-                std::cout << "      PID: " << processEntry.th32ProcessID 
-                          << " | " << name;
-                count++;
-                if (count > 50) { // Показываем только первые 50
-                    std::cout << " ... (и еще " << (count - 20) << " процессов)";
-                    break;
-                }
-                std::cout << std::endl;
-            } while (Process32NextW(snapshot, &processEntry));
-        }
-        CloseHandle(snapshot);
-    }
-}
+//                 std::cout << "      PID: " << processEntry.th32ProcessID 
+//                           << " | " << name;
+//                 count++;
+//                 if (count > 50) { // Показываем только первые 50
+//                     std::cout << " ... (и еще " << (count - 20) << " процессов)";
+//                     break;
+//                 }
+//                 std::cout << std::endl;
+//             } while (Process32NextW(snapshot, &processEntry));
+//         }
+//         CloseHandle(snapshot);
+//     }
+// }
 
-// Открыть процесс для чтения памяти
-HANDLE OpenProcessForReading(DWORD processId) {
-    return OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, processId);
-}
+// // Открыть процесс для чтения памяти
+// HANDLE OpenProcessForReading(DWORD processId) {
+//     return OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, processId);
+// }
 
-// Читаем память (шаблонная функция)
-template<typename T>
-bool ReadMemory(HANDLE process, uintptr_t address, T& value) {
-    SIZE_T bytesRead;
-    return ReadProcessMemory(process, (LPCVOID)address, &value, sizeof(T), &bytesRead) 
-           && bytesRead == sizeof(T);
-}
+// // Читаем память (шаблонная функция)
+// template<typename T>
+// bool ReadMemory(HANDLE process, uintptr_t address, T& value) {
+//     SIZE_T bytesRead;
+//     return ReadProcessMemory(process, (LPCVOID)address, &value, sizeof(T), &bytesRead) 
+//            && bytesRead == sizeof(T);
+// }
 
 // Получаем базовый адрес модуля в процессе
 uintptr_t GetModuleBaseAddress(HANDLE process, const std::wstring& moduleName) {
@@ -99,153 +195,230 @@ uintptr_t GetModuleBaseAddress(HANDLE process, const std::wstring& moduleName) {
     return baseAddress;
 }
 
-// Сканируем память в поисках значения
-std::vector<uintptr_t> ScanMemoryForValue(HANDLE process, uintptr_t startAddress, 
-                                          size_t size, int targetValue) {
-    std::vector<uintptr_t> foundAddresses;
-    std::vector<BYTE> buffer(size);
-    SIZE_T bytesRead;
+// // Сканируем память в поисках значения
+// std::vector<uintptr_t> ScanMemoryForValue(HANDLE process, uintptr_t startAddress, 
+//                                           size_t size, int targetValue) {
+//     std::vector<uintptr_t> foundAddresses;
+//     std::vector<BYTE> buffer(size);
+//     SIZE_T bytesRead;
     
-    if (ReadProcessMemory(process, (LPCVOID)startAddress, buffer.data(), size, &bytesRead)) {
-        for (size_t i = 0; i <= bytesRead - sizeof(int); i += sizeof(int)) {
-            int value = *(int*)(buffer.data() + i);
-            if (value == targetValue) {
-                foundAddresses.push_back(startAddress + i);
-            }
-        }
-    }
-    return foundAddresses;
-}
+//     if (ReadProcessMemory(process, (LPCVOID)startAddress, buffer.data(), size, &bytesRead)) {
+//         for (size_t i = 0; i <= bytesRead - sizeof(int); i += sizeof(int)) {
+//             int value = *(int*)(buffer.data() + i);
+//             if (value == targetValue) {
+//                 foundAddresses.push_back(startAddress + i);
+//             }
+//         }
+//     }
+//     return foundAddresses;
+// }
 
-// Простая функция для вывода wstring в cout
-void PrintWString(const std::wstring& wstr) {
-    int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
-    std::string str(size_needed, 0);
-    WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &str[0], size_needed, NULL, NULL);
-    std::cout << str;
-}
+// // Простая функция для вывода wstring в cout
+// void PrintWString(const std::wstring& wstr) {
+//     int size_needed = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, NULL, 0, NULL, NULL);
+//     std::string str(size_needed, 0);
+//     WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), -1, &str[0], size_needed, NULL, NULL);
+//     std::cout << str;
+// }
 
 // ============================================
 // 2. ОСНОВНАЯ ПРОГРАММА
 // ============================================
 
 int main() {
-    // Настройка консоли для UTF-8
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
-    
-    std::cout << "=== Memory Reader Demo (учебный пример) ===" << std::endl;
-    std::cout << "Принцип работы внешних читов для CS2" << std::endl << std::endl;
-    
-    // Сначала покажем все процессы
-    std::cout << "0. Проверяем запущенные процессы:" << std::endl;
-    ListAllProcesses();
-    std::cout << std::endl;
-    
-    // Шаг 1: Находим процесс (попробуем несколько вариантов)
-    std::cout << "1. Ищем процесс..." << std::endl;
-    
-    std::vector<std::wstring> possibleNames = {
-        L"CS2.exe",
-        // L"NOTEPAD.EXE",
-        // L"Notepad.exe"
-    };
-    
-    DWORD pid = 0;
-    std::wstring foundName;
-    
-    for (const auto& name : possibleNames) {
-        pid = GetProcessIdByName(name);
-        if (pid != 0) {
-            foundName = name;
-            break;
-        }
-    }
+
+    std::cout << "=== Поиск client.dll в CS2 ===" << std::endl << std::endl;
+
+    // 1. Находим процесс CS2
+    std::cout << "1. Ищем процесс CS2..." << std::endl;
+    DWORD pid = GetProcessIdByName(L"cs2.exe");
     
     if (pid == 0) {
         std::cout << "   [!] Процесс CS2.exe не найден!" << std::endl;
-        std::cout << "   [!] Пожалуйста, запусти CS2.exe и попробуй снова." << std::endl;
+        std::cout << "   Запусти CS2 и попробуй снова." << std::endl;
         std::cout << "   Нажми Enter для выхода...";
         std::cin.get();
         return 1;
     }
+    std::cout << "   [✓] Найден PID: " << pid << std::endl << std::endl;
+
+    // 2. Показываем все модули в процессе
+    std::cout << "2. Список модулей в процессе:" << std::endl;
+    ListModules(pid);
+    std::cout << std::endl;
+
+    // 3. Пытаемся найти client.dll по имени
+    std::cout << "3. Поиск client.dll по имени..." << std::endl;
+    uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
     
-    std::cout << "   [✓] Найден процесс: ";
-    PrintWString(foundName);
-    std::cout << " (PID: " << pid << ")" << std::endl;
+    if (clientBase != 0) {
+        std::cout << "   [✓] Найдена client.dll по адресу: 0x" << std::hex << clientBase << std::dec << std::endl;
+    } else {
+        std::cout << "   [!] client.dll не найдена по имени!" << std::endl;
+        std::cout << "   Возможно, игра защищена или модуль называется иначе." << std::endl;
+    }
+    std::cout << std::endl;
+
+    // 4. Пробуем найти сигнатуру MZ (для демонстрации)
+    std::cout << "4. Поиск сигнатуры MZ (0x4D 0x5A):" << std::endl;
     
-    // Шаг 2: Открываем процесс
-    HANDLE hProcess = OpenProcessForReading(pid);
+    // Открываем процесс для чтения
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (hProcess == NULL) {
-        std::cout << "   [!] Не удалось открыть процесс. Попробуй запустить от администратора." << std::endl;
+        std::cout << "   [!] Не удалось открыть процесс. Попробуй запустить от администратора!" << std::endl;
         std::cout << "   Нажми Enter для выхода...";
         std::cin.get();
         return 1;
     }
-    std::cout << "2. Открыли процесс для чтения памяти" << std::endl;
+
+    std::vector<BYTE> mzSignature = { 0x4D, 0x5A };
+    uintptr_t foundBase = FindModuleBySignature(hProcess, mzSignature);
     
-    // Шаг 3: Получаем базовый адрес модуля
-    // std::wstring moduleName = L"notepad.exe";
-    std::wstring moduleName = foundName;
-    uintptr_t moduleBase = GetModuleBaseAddress(hProcess, moduleName);
-    if (moduleBase == 0) {
-        std::cout << "   [!] Не удалось получить базовый адрес" << std::endl;
-        CloseHandle(hProcess);
-        std::cout << "   Нажми Enter для выхода...";
-        std::cin.get();
-        return 1;
-    }
-    std::cout << "3. Базовый адрес модуля: 0x" << std::hex << moduleBase << std::dec << std::endl;
-    
-    // Шаг 4: Читаем память
-    std::cout << "4. Читаем память процесса..." << std::endl;
-    
-    int firstBytes = 0;
-    if (ReadMemory(hProcess, moduleBase, firstBytes)) {
-        std::cout << "   Первые 4 байта по базовому адресу: 0x" << std::hex << firstBytes << std::dec << std::endl;
-        std::cout << "   (Это сигнатура MZ, которая есть у всех .exe файлов)" << std::endl;
-    }
-    
-    // Шаг 5: Сканируем память
-    std::cout << "5. Сканируем память в поисках значения 0x12345678..." << std::endl;
-    
-    size_t scanSize = 64 * 1024; // 64 KB
-    auto found = ScanMemoryForValue(hProcess, moduleBase, scanSize, 0x12345678);
-    
-    if (!found.empty()) {
-        std::cout << "   [✓] Найдено " << found.size() << " совпадений!" << std::endl;
-        for (size_t i = 0; i < std::min(found.size(), size_t(5)); ++i) {
-            std::cout << "      Адрес: 0x" << std::hex << found[i] << std::dec << std::endl;
-        }
+    if (foundBase != 0) {
+        std::cout << "   [✓] Сигнатура MZ найдена в модуле по адресу: 0x" << std::hex << foundBase << std::dec << std::endl;
+        std::cout << "   (Это НЕ обязательно client.dll! Это ПЕРВЫЙ найденный модуль)" << std::endl;
     } else {
-        std::cout << "   Значение 0x12345678 не найдено (это нормально для демонстрации)" << std::endl;
+        std::cout << "   [!] Сигнатура MZ не найдена!" << std::endl;
     }
-    
-    // Шаг 6: Демонстрация чтения разных типов данных
-    std::cout << "6. Демонстрация чтения разных типов данных:" << std::endl;
-    
-    int intValue = 0;
-    uintptr_t testAddress = moduleBase + 0x1000;
-    if (ReadMemory(hProcess, testAddress, intValue)) {
-        std::cout << "   int по адресу 0x" << std::hex << testAddress 
-                  << ": " << std::dec << intValue << std::endl;
+    std::cout << std::endl;
+
+    // 5. Вывод итогов
+    std::cout << "5. Итог:" << std::endl;
+    if (clientBase != 0) {
+        std::cout << "   [✓] client.dll найдена! Базовый адрес: 0x" << std::hex << clientBase << std::dec << std::endl;
+        std::cout << "   Это тот самый адрес, который используют читы для ESP и Aimbot." << std::endl;
     } else {
-        std::cout << "   Не удалось прочитать int по адресу 0x" << std::hex << testAddress << std::dec << std::endl;
+        std::cout << "   [!] client.dll не найдена. Причины:" << std::endl;
+        std::cout << "   1. Игра защищена античитом (VAC)" << std::endl;
+        std::cout << "   2. Нужны права администратора" << std::endl;
+        std::cout << "   3. Модуль может называться по-другому" << std::endl;
     }
-    
-    float floatValue = 0.0f;
-    testAddress = moduleBase + 0x2000;
-    if (ReadMemory(hProcess, testAddress, floatValue)) {
-        std::cout << "   float по адресу 0x" << std::hex << testAddress 
-                  << ": " << std::dec << floatValue << std::endl;
-    } else {
-        std::cout << "   Не удалось прочитать float по адресу 0x" << std::hex << testAddress << std::dec << std::endl;
-    }
-    
-    // Закрываем хендл процесса
+
     CloseHandle(hProcess);
-    std::cout << std::endl << "7. Готово! Нажми Enter для выхода..." << std::endl;
-    std::cin.get();
     
+    std::cout << std::endl << "Нажми Enter для выхода...";
+    std::cin.get();
     return 0;
 }
+
+// int main() {
+//     // Настройка консоли для UTF-8
+//     SetConsoleOutputCP(CP_UTF8);
+//     SetConsoleCP(CP_UTF8);
+    
+//     std::cout << "=== Memory Reader Demo (учебный пример) ===" << std::endl;
+//     std::cout << "Принцип работы внешних читов для CS2" << std::endl << std::endl;
+    
+//     // Сначала покажем все процессы
+//     std::cout << "0. Проверяем запущенные процессы:" << std::endl;
+//     ListAllProcesses();
+//     std::cout << std::endl;
+    
+//     // Шаг 1: Находим процесс (попробуем несколько вариантов)
+//     std::cout << "1. Ищем процесс..." << std::endl;
+    
+//     std::vector<std::wstring> possibleNames = {
+//         L"CS2.exe",
+//         // L"NOTEPAD.EXE",
+//         // L"Notepad.exe"
+//     };
+    
+//     DWORD pid = 0;
+//     std::wstring foundName;
+    
+//     for (const auto& name : possibleNames) {
+//         pid = GetProcessIdByName(name);
+//         if (pid != 0) {
+//             foundName = name;
+//             break;
+//         }
+//     }
+    
+//     if (pid == 0) {
+//         std::cout << "   [!] Процесс CS2.exe не найден!" << std::endl;
+//         std::cout << "   [!] Пожалуйста, запусти CS2.exe и попробуй снова." << std::endl;
+//         std::cout << "   Нажми Enter для выхода...";
+//         std::cin.get();
+//         return 1;
+//     }
+    
+//     std::cout << "   [✓] Найден процесс: ";
+//     PrintWString(foundName);
+//     std::cout << " (PID: " << pid << ")" << std::endl;
+    
+//     // Шаг 2: Открываем процесс
+//     HANDLE hProcess = OpenProcessForReading(pid);
+//     if (hProcess == NULL) {
+//         std::cout << "   [!] Не удалось открыть процесс. Попробуй запустить от администратора." << std::endl;
+//         std::cout << "   Нажми Enter для выхода...";
+//         std::cin.get();
+//         return 1;
+//     }
+//     std::cout << "2. Открыли процесс для чтения памяти" << std::endl;
+    
+//     // Шаг 3: Получаем базовый адрес модуля
+//     std::wstring moduleName = foundName;
+//     uintptr_t moduleBase = GetModuleBaseAddress(hProcess, moduleName);
+//     if (moduleBase == 0) {
+//         std::cout << "   [!] Не удалось получить базовый адрес" << std::endl;
+//         CloseHandle(hProcess);
+//         std::cout << "   Нажми Enter для выхода...";
+//         std::cin.get();
+//         return 1;
+//     }
+//     std::cout << "3. Базовый адрес модуля: 0x" << std::hex << moduleBase << std::dec << std::endl;
+    
+//     // Шаг 4: Читаем память
+//     std::cout << "4. Читаем память процесса..." << std::endl;
+    
+//     int firstBytes = 0;
+//     if (ReadMemory(hProcess, moduleBase, firstBytes)) {
+//         std::cout << "   Первые 4 байта по базовому адресу: 0x" << std::hex << firstBytes << std::dec << std::endl;
+//         std::cout << "   (Это сигнатура MZ, которая есть у всех .exe файлов)" << std::endl;
+//     }
+    
+//     // Шаг 5: Сканируем память
+//     std::cout << "5. Сканируем память в поисках значения 0x12345678..." << std::endl;
+    
+//     size_t scanSize = 64 * 1024; // 64 KB
+//     auto found = ScanMemoryForValue(hProcess, moduleBase, scanSize, 0x12345678);
+    
+//     if (!found.empty()) {
+//         std::cout << "   [✓] Найдено " << found.size() << " совпадений!" << std::endl;
+//         for (size_t i = 0; i < std::min(found.size(), size_t(5)); ++i) {
+//             std::cout << "      Адрес: 0x" << std::hex << found[i] << std::dec << std::endl;
+//         }
+//     } else {
+//         std::cout << "   Значение 0x12345678 не найдено (это нормально для демонстрации)" << std::endl;
+//     }
+    
+//     // Шаг 6: Демонстрация чтения разных типов данных
+//     std::cout << "6. Демонстрация чтения разных типов данных:" << std::endl;
+    
+//     int intValue = 0;
+//     uintptr_t testAddress = moduleBase + 0x1000;
+//     if (ReadMemory(hProcess, testAddress, intValue)) {
+//         std::cout << "   int по адресу 0x" << std::hex << testAddress 
+//                   << ": " << std::dec << intValue << std::endl;
+//     } else {
+//         std::cout << "   Не удалось прочитать int по адресу 0x" << std::hex << testAddress << std::dec << std::endl;
+//     }
+    
+//     float floatValue = 0.0f;
+//     testAddress = moduleBase + 0x2000;
+//     if (ReadMemory(hProcess, testAddress, floatValue)) {
+//         std::cout << "   float по адресу 0x" << std::hex << testAddress 
+//                   << ": " << std::dec << floatValue << std::endl;
+//     } else {
+//         std::cout << "   Не удалось прочитать float по адресу 0x" << std::hex << testAddress << std::dec << std::endl;
+//     }
+    
+//     // Закрываем хендл процесса
+//     CloseHandle(hProcess);
+//     std::cout << std::endl << "7. Готово! Нажми Enter для выхода..." << std::endl;
+//     std::cin.get();
+    
+//     return 0;
+// }
