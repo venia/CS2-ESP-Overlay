@@ -77,6 +77,32 @@ uintptr_t FindModuleBySignature(HANDLE process, const std::vector<BYTE>& signatu
     return 0;
 }
 
+// ============================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ВЫВОДА
+// ============================================
+
+void ListModules(DWORD pid) {
+    auto modules = GetProcessModules(pid);
+    
+    std::cout << "   Загруженные модули (" << modules.size() << " шт.):" << std::endl;
+    int count = 0;
+    for (const auto& module : modules) {
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, module.szModule, -1, NULL, 0, NULL, NULL);
+        std::string name(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, module.szModule, -1, &name[0], size_needed, NULL, NULL);
+        
+        std::cout << "      " << name 
+                  << " | Base: 0x" << std::hex << (uintptr_t)module.modBaseAddr 
+                  << " | Size: 0x" << module.modBaseSize 
+                  << std::dec << std::endl;
+        count++;
+        if (count > 20) {
+            std::cout << "      ... и еще " << (modules.size() - count) << " модулей" << std::endl;
+            break;
+        }
+    }
+}
+
 
 
 
@@ -195,6 +221,19 @@ uintptr_t GetModuleBaseAddress(HANDLE process, const std::wstring& moduleName) {
     return baseAddress;
 }
 
+// Получить базовый адрес модуля по имени (принимает PID)
+uintptr_t GetModuleBaseAddress(DWORD pid, const std::wstring& moduleName) {
+    auto modules = GetProcessModules(pid);
+    
+    for (const auto& module : modules) {
+        if (_wcsicmp(moduleName.c_str(), module.szModule) == 0) {
+            return (uintptr_t)module.modBaseAddr;
+        }
+    }
+    
+    return 0;
+}
+
 // // Сканируем память в поисках значения
 // std::vector<uintptr_t> ScanMemoryForValue(HANDLE process, uintptr_t startAddress, 
 //                                           size_t size, int targetValue) {
@@ -249,7 +288,7 @@ int main() {
     ListModules(pid);
     std::cout << std::endl;
 
-    // 3. Пытаемся найти client.dll по имени
+    // 3. Пытаемся найти client.dll по имени (используем перегруженную функцию с PID)
     std::cout << "3. Поиск client.dll по имени..." << std::endl;
     uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
     
@@ -293,7 +332,8 @@ int main() {
         std::cout << "   [!] client.dll не найдена. Причины:" << std::endl;
         std::cout << "   1. Игра защищена античитом (VAC)" << std::endl;
         std::cout << "   2. Нужны права администратора" << std::endl;
-        std::cout << "   3. Модуль может называться по-другому" << std::endl;
+        std::cout << "   3. Модуль может называться по-другому (например, client.dll в другой папке)" << std::endl;
+        std::cout << "   4. CS2 использует защиту памяти (обфускацию)" << std::endl;
     }
 
     CloseHandle(hProcess);
