@@ -6,6 +6,23 @@
 #include <string>
 #include <algorithm>
 
+// Из offsets.hpp
+namespace client_dll {
+    constexpr std::ptrdiff_t dwEntityList = 0x2572230;      // ← Проверь!
+    constexpr std::ptrdiff_t dwLocalPlayerPawn = 0x23C7268; // ← Проверь!
+    constexpr std::ptrdiff_t dwViewMatrix = 0x23CC830;      // ← Проверь!
+}
+
+// Из client_dll.hpp - C_BaseEntity (смещения для всех сущностей)
+namespace C_BaseEntity {
+    constexpr std::ptrdiff_t m_iHealth = 0x34C;
+    constexpr std::ptrdiff_t m_iTeamNum = 0x3E7;
+    constexpr std::ptrdiff_t m_lifeState = 0x354;
+    constexpr std::ptrdiff_t m_fFlags = 0x3F4;
+    constexpr std::ptrdiff_t m_vecOrigin = 0x600;  // ← НАЙДИ В ФАЙЛЕ!
+    constexpr std::ptrdiff_t m_vecVelocity = 0x430;
+}
+
 // ============================================
 // 1. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 // ============================================
@@ -103,34 +120,6 @@ void ListModules(DWORD pid) {
     }
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Получить ID процесса по имени (без учета регистра)
 DWORD GetProcessIdByName(const std::wstring& processName) {
     DWORD processId = 0;
@@ -153,6 +142,35 @@ DWORD GetProcessIdByName(const std::wstring& processName) {
     }
     return processId;
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 // // Получить список всех запущенных процессов (для отладки)
 // void ListAllProcesses() {
@@ -260,6 +278,22 @@ uintptr_t GetModuleBaseAddress(DWORD pid, const std::wstring& moduleName) {
 //     std::cout << str;
 // }
 
+
+template<typename T>
+bool ReadMemory(HANDLE process, uintptr_t address, T& value) {
+    SIZE_T bytesRead;
+    return ReadProcessMemory(process, (LPCVOID)address, &value, sizeof(T), &bytesRead) 
+           && bytesRead == sizeof(T);
+}
+
+bool IsValidAddress(uintptr_t address) {
+    return address > 0x10000 && address < 0x7FFFFFFF0000;
+}
+
+struct Vector3 {
+    float x, y, z;
+};
+
 // ============================================
 // 2. ОСНОВНАЯ ПРОГРАММА
 // ============================================
@@ -283,8 +317,18 @@ int main() {
     }
     std::cout << "   [✓] Найден PID: " << pid << std::endl << std::endl;
 
+    // Открываем процесс для чтения
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
+    if (hProcess == NULL) {
+        std::cout << "   [!] Не удалось открыть процесс. Попробуй запустить от администратора!" << std::endl;
+        std::cout << "   Нажми Enter для выхода...";
+        std::cin.get();
+        return 1;
+    }
+    std::cout << "2. [✓] Процесс открыт для чтения" << std::endl;
+
     // 2. Показываем все модули в процессе
-    std::cout << "2. Список модулей в процессе:" << std::endl;
+    std::cout << "2.1. Список модулей в процессе:" << std::endl;
     ListModules(pid);
     std::cout << std::endl;
 
@@ -299,29 +343,112 @@ int main() {
         std::cout << "   Возможно, игра защищена или модуль называется иначе." << std::endl;
     }
     std::cout << std::endl;
+    std::cout << "3. [✓] client.dll база: 0x" << std::hex << clientBase << std::dec << std::endl;
 
-    // 4. Пробуем найти сигнатуру MZ (для демонстрации)
-    std::cout << "4. Поиск сигнатуры MZ (0x4D 0x5A):" << std::endl;
-    
-    // Открываем процесс для чтения
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (hProcess == NULL) {
-        std::cout << "   [!] Не удалось открыть процесс. Попробуй запустить от администратора!" << std::endl;
-        std::cout << "   Нажми Enter для выхода...";
+   // 4. Читаем локального игрока
+    uintptr_t localPlayerPawn = 0;
+    if (!ReadMemory(hProcess, clientBase + client_dll::dwLocalPlayerPawn, localPlayerPawn)) {
+        std::cout << "[!] Не удалось прочитать локального игрока!" << std::endl;
+        CloseHandle(hProcess);
         std::cin.get();
         return 1;
     }
-
-    std::vector<BYTE> mzSignature = { 0x4D, 0x5A };
-    uintptr_t foundBase = FindModuleBySignature(hProcess, mzSignature);
     
-    if (foundBase != 0) {
-        std::cout << "   [✓] Сигнатура MZ найдена в модуле по адресу: 0x" << std::hex << foundBase << std::dec << std::endl;
-        std::cout << "   (Это НЕ обязательно client.dll! Это ПЕРВЫЙ найденный модуль)" << std::endl;
-    } else {
-        std::cout << "   [!] Сигнатура MZ не найдена!" << std::endl;
+    if (!IsValidAddress(localPlayerPawn)) {
+        std::cout << "[!] Некорректный адрес локального игрока!" << std::endl;
+        CloseHandle(hProcess);
+        std::cin.get();
+        return 1;
     }
-    std::cout << std::endl;
+    
+    std::cout << "4. [✓] Локальный игрок: 0x" << std::hex << localPlayerPawn << std::dec << std::endl;
+
+    // 5. Читаем данные локального игрока (ИСПОЛЬЗУЕМ ПРАВИЛЬНЫЕ СМЕЩЕНИЯ)
+    int localHealth = 0;
+    int localTeam = 0;
+    Vector3 localPos = {0, 0, 0};
+    
+    ReadMemory(hProcess, localPlayerPawn + C_BaseEntity::m_iHealth, localHealth);
+    ReadMemory(hProcess, localPlayerPawn + C_BaseEntity::m_iTeamNum, localTeam);
+    ReadMemory(hProcess, localPlayerPawn + C_BaseEntity::m_vecOrigin, localPos);
+    
+    std::cout << "   [Локальный] HP: " << localHealth 
+              << " | Команда: " << localTeam 
+              << " | Позиция: (" << localPos.x << ", " << localPos.y << ", " << localPos.z << ")" << std::endl;
+
+    // 6. Читаем список сущностей
+    uintptr_t entityList = 0;
+    if (!ReadMemory(hProcess, clientBase + client_dll::dwEntityList, entityList)) {
+        std::cout << "[!] Не удалось прочитать список сущностей!" << std::endl;
+        CloseHandle(hProcess);
+        std::cin.get();
+        return 1;
+    }
+    std::cout << "5. [✓] Список сущностей: 0x" << std::hex << entityList << std::dec << std::endl;
+
+    // 7. Проходим по игрокам
+    std::cout << std::endl << "6. Игроки на сервере:" << std::endl;
+    
+    int playerCount = 0;
+    for (int i = 0; i < 64; i++) {
+        uintptr_t playerPawn = 0;
+        uintptr_t entityEntry = entityList + (i + 1) * 0x10;
+        
+        if (!ReadMemory(hProcess, entityEntry, playerPawn) || !IsValidAddress(playerPawn)) {
+            continue;
+        }
+
+        // Читаем команду
+        int team = 0;
+        if (!ReadMemory(hProcess, playerPawn + C_BaseEntity::m_iTeamNum, team)) {
+            continue;
+        }
+        
+        // Игнорируем неигровые сущности (команда 0, 1 или > 3)
+        if (team != 2 && team != 3) {
+            continue;
+        }
+
+        // Читаем здоровье
+        int health = 0;
+        ReadMemory(hProcess, playerPawn + C_BaseEntity::m_iHealth, health);
+        
+        // Игнорируем мертвых
+        if (health <= 0 || health > 100) {
+            continue;
+        }
+
+        // Читаем позицию
+        Vector3 pos = {0, 0, 0};
+        ReadMemory(hProcess, playerPawn + C_BaseEntity::m_vecOrigin, pos);
+        
+        bool isEnemy = (team != localTeam && localTeam != 0);
+        playerCount++;
+        
+        std::cout << "   [" << i << "] Команда: " << team 
+                  << " | HP: " << health 
+                  << " | Позиция: (" << pos.x << ", " << pos.y << ", " << pos.z << ")"
+                  << (isEnemy ? " [ВРАГ!]" : " [Союзник]")
+                  << std::endl;
+    }
+
+    if (playerCount == 0) {
+        std::cout << "   Нет живых игроков на сервере" << std::endl;
+    }
+
+    
+    // std::cout << "4. Поиск сигнатуры MZ (0x4D 0x5A):" << std::endl;
+    // // 4. Пробуем найти сигнатуру MZ (для демонстрации)
+    // std::vector<BYTE> mzSignature = { 0x4D, 0x5A };
+    // uintptr_t foundBase = FindModuleBySignature(hProcess, mzSignature);
+    
+    // if (foundBase != 0) {
+    //     std::cout << "   [✓] Сигнатура MZ найдена в модуле по адресу: 0x" << std::hex << foundBase << std::dec << std::endl;
+    //     std::cout << "   (Это НЕ обязательно client.dll! Это ПЕРВЫЙ найденный модуль)" << std::endl;
+    // } else {
+    //     std::cout << "   [!] Сигнатура MZ не найдена!" << std::endl;
+    // }
+    // std::cout << std::endl;
 
     // 5. Вывод итогов
     std::cout << "5. Итог:" << std::endl;

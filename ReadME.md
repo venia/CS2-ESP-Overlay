@@ -1,71 +1,178 @@
-                                        D:\Projects\c-cpp\NotepadReadMemory\main.exe
-=== Memory Reader Demo (учебный пример) ===
-Принцип работы внешних читов для CS2
+PS D:\Projects\c-cpp\NotepadReadMemory> D:\Projects\c-cpp\NotepadReadMemory\main.exe
+=== Поиск client.dll в CS2 ===
 
-0. Проверяем запущенные процессы:
-   Запущенные процессы:
-      PID: 0 | [System Process]
-      PID: 4 | System
-      PID: 272 | Registry
-      PID: 764 | smss.exe
-      PID: 1228 | csrss.exe
-      PID: 1312 | wininit.exe
-      PID: 1320 | csrss.exe
-      PID: 1412 | services.exe
-      PID: 1440 | winlogon.exe
-      PID: 1484 | lsass.exe
-      PID: 1624 | svchost.exe
-      PID: 1660 | fontdrvhost.exe
-      PID: 1656 | fontdrvhost.exe
-      PID: 1748 | svchost.exe
-      PID: 1796 | svchost.exe
-      PID: 1860 | dwm.exe
-      PID: 1224 | svchost.exe
-      PID: 1232 | svchost.exe
-      PID: 1324 | svchost.exe
-      PID: 1304 | svchost.exe
-      PID: 1080 | svchost.exe
-      PID: 2092 | svchost.exe
-      PID: 2100 | svchost.exe
-      PID: 2140 | svchost.exe
-      PID: 2156 | svchost.exe
-      PID: 2164 | svchost.exe
-      PID: 2252 | svchost.exe
-      PID: 2372 | svchost.exe
-      PID: 2392 | svchost.exe
-      PID: 2820 | svchost.exe
-      PID: 2860 | NVDisplay.Container.exe
-      PID: 3000 | svchost.exe
-      PID: 3084 | svchost.exe
-      PID: 3092 | svchost.exe
-      PID: 3100 | svchost.exe
-      PID: 3120 | svchost.exe
-      PID: 3144 | svchost.exe
-      PID: 3152 | svchost.exe
-      PID: 3304 | WUDFHost.exe
-      PID: 3312 | Memory Compression
-      PID: 3380 | svchost.exe
-      PID: 3408 | svchost.exe
-      PID: 3440 | svchost.exe
-      PID: 3552 | svchost.exe
-      PID: 3572 | svchost.exe
-      PID: 3612 | svchost.exe
-      PID: 3728 | svchost.exe
-      PID: 3736 | QHActiveDefense.exe
-      PID: 3744 | svchost.exe
-      PID: 3904 | svchost.exe
-      PID: 3944 | svchost.exe ... (и еще 31 процессов)
-1. Ищем процесс...
-   [✓] Найден процесс: CS2.exe (PID: 26008)
-2. Открыли процесс для чтения памяти
-3. Базовый адрес модуля: 0x7ff735c20000
-4. Читаем память процесса...
-   Первые 4 байта по базовому адресу: 0x905a4d
-   (Это сигнатура MZ, которая есть у всех .exe файлов)
-5. Сканируем память в поисках значения 0x12345678...
-   Значение 0x12345678 не найдено (это нормально для демонстрации)
-6. Демонстрация чтения разных типов данных:
-   int по адресу 0x7ff735c21000: 957189448
-   float по адресу 0x7ff735c22000: -2.77824e-32
+1. Ищем процесс CS2...
+   [✓] Найден PID: 32044
 
-7. Готово! Нажми Enter для выхода...
+2. Список модулей в процессе:
+   Загруженные модули (179 шт.):
+      cs2.exe | Base: 0x7ff661640000 | Size: 0x432000
+      ntdll.dll | Base: 0x7ffc19020000 | Size: 0x266000
+      KERNEL32.DLL | Base: 0x7ffc18670000 | Size: 0xc9000
+      KERNELBASE.dll | Base: 0x7ffc16940000 | Size: 0x3ff000
+      USER32.dll | Base: 0x7ffc17cc0000 | Size: 0x1c6000
+      win32u.dll | Base: 0x7ffc16850000 | Size: 0x27000
+      GDI32.dll | Base: 0x7ffc18f50000 | Size: 0x2b000
+      gdi32full.dll | Base: 0x7ffc16230000 | Size: 0x129000
+      msvcp_win.dll | Base: 0x7ffc167a0000 | Size: 0xa3000
+      ucrtbase.dll | Base: 0x7ffc16640000 | Size: 0x14c000
+      IMM32.DLL | Base: 0x7ffc18f80000 | Size: 0x32000
+      gameoverlayrenderer64.dll | Base: 0x7ffbdfae0000 | Size: 0x1b7000
+      ADVAPI32.dll | Base: 0x7ffc18e80000 | Size: 0xbc000
+      msvcrt.dll | Base: 0x7ffc18130000 | Size: 0xa9000
+      sechost.dll | Base: 0x7ffc18dd0000 | Size: 0xaa000
+      RPCRT4.dll | Base: 0x7ffc18740000 | Size: 0x118000
+      ole32.dll | Base: 0x7ffc18b30000 | Size: 0x199000
+      combase.dll | Base: 0x7ffc17930000 | Size: 0x385000
+      OLEAUT32.dll | Base: 0x7ffc17f40000 | Size: 0xd9000
+      PSAPI.DLL | Base: 0x7ffc177c0000 | Size: 0x8000
+      WINMM.dll | Base: 0x7ffc087f0000 | Size: 0x36000
+      ... и еще 158 модулей
+
+3. Поиск client.dll по имени...
+   [✓] Найдена client.dll по адресу: 0x7ffb43a70000
+
+4. Поиск сигнатуры MZ (0x4D 0x5A):
+   [!] Сигнатура MZ не найдена!
+
+5. Итог:
+   [✓] client.dll найдена! Базовый адрес: 0x7ffb43a70000
+   Это тот самый адрес, который используют читы для ESP и Aimbot.
+=======================================================================================================================================================
+Анализ результатов
+text
+[✓] Найден PID: 26008                    ← Процесс CS2 найден
+client.dll | Base: 0x7ffcdaf30000         ← БАЗА! Именно её ищут читы
+Что означает адрес 0x7ffcdaf30000?
+Это базовый адрес (base address) модуля client.dll в памяти. Все данные об игроках, их позициях, здоровье и оружии находятся относительно этого адреса:
+
+text
+client.dll (база: 0x7ffcdaf30000)
+├── + 0x123456 → позиции игроков (entityList)
+├── + 0x789ABC → здоровье (health)
+├── + 0xDEF012 → оружие (weapon)
+└── + ... (сотни других данных)
+🔍 Почему сигнатура MZ не найдена?
+Это нормально и даже логично! Вот почему:
+
+Мы искали только первые 4 байта 0x4D 0x5A (MZ), но эта сигнатура есть у всех .exe и .dll файлов
+
+Функция FindModuleBySignature находит первый модуль с этой сигнатурой
+
+В списке модулей первым идет cs2.exe (сам исполняемый файл), который тоже начинается с MZ
+
+Почему она не найдена? Скорее всего, потому что:
+
+ReadProcessMemory не может прочитать первые байты cs2.exe из-за защиты
+
+Или мы искали только в загруженных модулях, но первый модуль (cs2.exe) защищен
+
+Важно: Мы уже нашли client.dll по имени — это правильный способ для учебного примера.
+=======================================================================================================================================================
+PS D:\Projects\c-cpp\NotepadReadMemory> D:\Projects\c-cpp\NotepadReadMemory\main.exe
+=== Поиск client.dll в CS2 ===
+
+1. Ищем процесс CS2...
+   [✓] Найден PID: 32044
+
+2. [✓] Процесс открыт для чтения
+2.1. Список модулей в процессе:
+   Загруженные модули (179 шт.):
+      cs2.exe | Base: 0x7ff661640000 | Size: 0x432000
+      ntdll.dll | Base: 0x7ffc19020000 | Size: 0x266000
+      KERNEL32.DLL | Base: 0x7ffc18670000 | Size: 0xc9000
+      KERNELBASE.dll | Base: 0x7ffc16940000 | Size: 0x3ff000
+      USER32.dll | Base: 0x7ffc17cc0000 | Size: 0x1c6000
+      win32u.dll | Base: 0x7ffc16850000 | Size: 0x27000
+      GDI32.dll | Base: 0x7ffc18f50000 | Size: 0x2b000
+      gdi32full.dll | Base: 0x7ffc16230000 | Size: 0x129000
+      msvcp_win.dll | Base: 0x7ffc167a0000 | Size: 0xa3000
+      ucrtbase.dll | Base: 0x7ffc16640000 | Size: 0x14c000
+      IMM32.DLL | Base: 0x7ffc18f80000 | Size: 0x32000
+      gameoverlayrenderer64.dll | Base: 0x7ffbdfae0000 | Size: 0x1b7000
+      ADVAPI32.dll | Base: 0x7ffc18e80000 | Size: 0xbc000
+      msvcrt.dll | Base: 0x7ffc18130000 | Size: 0xa9000
+      sechost.dll | Base: 0x7ffc18dd0000 | Size: 0xaa000
+      RPCRT4.dll | Base: 0x7ffc18740000 | Size: 0x118000
+      ole32.dll | Base: 0x7ffc18b30000 | Size: 0x199000
+      combase.dll | Base: 0x7ffc17930000 | Size: 0x385000
+      OLEAUT32.dll | Base: 0x7ffc17f40000 | Size: 0xd9000
+      PSAPI.DLL | Base: 0x7ffc177c0000 | Size: 0x8000
+      WINMM.dll | Base: 0x7ffc087f0000 | Size: 0x36000
+      ... и еще 158 модулей
+
+3. Поиск client.dll по имени...
+   [✓] Найдена client.dll по адресу: 0x7ffb43a70000
+
+3. [✓] client.dll база: 0x7ffb43a70000
+4. [✓] Локальный игрок: 0x4f99da6c000
+   Здоровье: 1273 | Команда: 0
+5. [✓] Список сущностей: 0x4f94f4a4000
+
+6. Игроки на сервере:
+   Игрок #37 | Команда: 255 | HP: 1 | Позиция: (1.49919e+15, 1.78385e-42, 0) [Союзник]
+5. Итог:
+   [✓] client.dll найдена! Базовый адрес: 0x7ffb43a70000
+   Это тот самый адрес, который используют читы для ESP и Aimbot.
+
+Нажми Enter для выхода...
+
+=======================================================================================================================================================
+📌 Ключевые моменты
+Смещение	Значение	Что это
+dwEntityList = 0x2572230	Список всех сущностей (игроков, бомба, и т.д.)	Самый важный оффсет для ESP
+dwLocalPlayerPawn = 0x23C7268	Указатель на локального игрока	Нужен для чтения своего здоровья
+m_iHealth = 0x344	Здоровье игрока	Показывает HP
+m_iTeamNum = 0x3C3	Команда (2=Террор, 3=CT)	Для определения врагов
+m_vecOrigin = 0x138	Позиция в мире	Для ESP (показ позиций)
+dwViewMatrix = 0x23CC830	Матрица для 3D→2D	Для WorldToScreen
+
+Следующий шаг — добавить WorldToScreen и рисовать ESP поверх игры! 😊
+=======================================================================================================================================================
+
+
+PS D:\Projects\c-cpp\NotepadReadMemory> D:\Projects\c-cpp\NotepadReadMemory\main.exe
+=== Поиск client.dll в CS2 ===
+
+1. Ищем процесс CS2...
+   [✓] Найден PID: 32044
+
+2. [✓] Процесс открыт для чтения
+2.1. Список модулей в процессе:
+   Загруженные модули (179 шт.):
+      cs2.exe | Base: 0x7ff661640000 | Size: 0x432000
+      ntdll.dll | Base: 0x7ffc19020000 | Size: 0x266000
+      KERNEL32.DLL | Base: 0x7ffc18670000 | Size: 0xc9000
+      KERNELBASE.dll | Base: 0x7ffc16940000 | Size: 0x3ff000
+      USER32.dll | Base: 0x7ffc17cc0000 | Size: 0x1c6000
+      win32u.dll | Base: 0x7ffc16850000 | Size: 0x27000
+      GDI32.dll | Base: 0x7ffc18f50000 | Size: 0x2b000
+      gdi32full.dll | Base: 0x7ffc16230000 | Size: 0x129000
+      msvcp_win.dll | Base: 0x7ffc167a0000 | Size: 0xa3000
+      ucrtbase.dll | Base: 0x7ffc16640000 | Size: 0x14c000
+      IMM32.DLL | Base: 0x7ffc18f80000 | Size: 0x32000
+      gameoverlayrenderer64.dll | Base: 0x7ffbdfae0000 | Size: 0x1b7000
+      ADVAPI32.dll | Base: 0x7ffc18e80000 | Size: 0xbc000
+      msvcrt.dll | Base: 0x7ffc18130000 | Size: 0xa9000
+      sechost.dll | Base: 0x7ffc18dd0000 | Size: 0xaa000
+      RPCRT4.dll | Base: 0x7ffc18740000 | Size: 0x118000
+      ole32.dll | Base: 0x7ffc18b30000 | Size: 0x199000
+      combase.dll | Base: 0x7ffc17930000 | Size: 0x385000
+      OLEAUT32.dll | Base: 0x7ffc17f40000 | Size: 0xd9000
+      PSAPI.DLL | Base: 0x7ffc177c0000 | Size: 0x8000
+      WINMM.dll | Base: 0x7ffc087f0000 | Size: 0x36000
+      ... и еще 158 модулей
+
+3. Поиск client.dll по имени...
+   [✓] Найдена client.dll по адресу: 0x7ffb43a70000
+
+3. [✓] client.dll база: 0x7ffb43a70000
+4. [✓] Локальный игрок: 0x4f99da6c000
+   [Локальный] HP: 100 | Команда: 2 | Позиция: (3505.61, 4.59107e-41, 3505.62)
+5. [✓] Список сущностей: 0x4f94f4a4000
+
+6. Игроки на сервере:
+   Нет живых игроков на сервере
+5. Итог:
+   [✓] client.dll найдена! Базовый адрес: 0x7ffb43a70000
+   Это тот самый адрес, который используют читы для ESP и Aimbot.
