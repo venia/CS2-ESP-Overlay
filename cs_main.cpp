@@ -10,7 +10,7 @@
 #include <regex>
 
 // ============================================
-// СТРУКТУРЫ (ТОЛЬКО ОДИН РАЗ!)
+// СТРУКТУРЫ
 // ============================================
 
 struct Offsets {
@@ -44,17 +44,23 @@ struct PlayerInfo {
 };
 
 // ============================================
-// ПРОТОТИПЫ ФУНКЦИЙ (чтобы компилятор знал о них)
+// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// ============================================
+
+HWND g_hOverlay = NULL;
+bool g_running = true;
+
+// ============================================
+// ПРОТОТИПЫ ФУНКЦИЙ
 // ============================================
 
 template<typename T>
 bool ReadMemory(HANDLE process, uintptr_t address, T& value);
-
 bool IsValidAddress(uintptr_t address);
 bool WorldToScreen(Vector3 worldPos, Vector2& screenPos, ViewMatrix vm, int screenWidth, int screenHeight);
 
 // ============================================
-// ФУНКЦИИ
+// ФУНКЦИИ РИСОВАНИЯ
 // ============================================
 
 bool WorldToScreen(Vector3 worldPos, Vector2& screenPos, ViewMatrix vm, int screenWidth, int screenHeight) {
@@ -124,14 +130,12 @@ void DrawText(HDC hdc, Vector2 screenPos, const char* text, COLORREF color, int 
     
     HFONT oldFont = (HFONT)SelectObject(hdc, font);
     
-    // Черная тень
     SetTextColor(hdc, RGB(0, 0, 0));
     TextOutA(hdc, (int)screenPos.x - 1, (int)screenPos.y - height - 16, text, (int)strlen(text));
     TextOutA(hdc, (int)screenPos.x + 1, (int)screenPos.y - height - 16, text, (int)strlen(text));
     TextOutA(hdc, (int)screenPos.x, (int)screenPos.y - height - 17, text, (int)strlen(text));
     TextOutA(hdc, (int)screenPos.x, (int)screenPos.y - height - 15, text, (int)strlen(text));
     
-    // Основной текст
     SetTextColor(hdc, color);
     TextOutA(hdc, (int)screenPos.x, (int)screenPos.y - height - 16, text, (int)strlen(text));
     
@@ -143,7 +147,6 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
              ViewMatrix vm, int screenWidth, int screenHeight) {
     
     for (const auto& player : players) {
-        // Пропускаем себя
         if (player.position.x == localPlayer.position.x && 
             player.position.y == localPlayer.position.y &&
             player.position.z == localPlayer.position.z) {
@@ -173,11 +176,48 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
 }
 
 // ============================================
-// ОВЕРЛЕЙ
+// ОКНО ОВЕРЛЕЯ
 // ============================================
 
+// Оконная процедура для оверлея (обрабатывает сообщения)
+LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_DESTROY:
+            g_running = false;
+            PostQuitMessage(0);
+            return 0;
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) {
+                g_running = false;
+                DestroyWindow(hWnd);
+                return 0;
+            }
+            break;
+        case WM_PAINT: {
+            // Просто подтверждаем, что окно перерисовано
+            PAINTSTRUCT ps;
+            BeginPaint(hWnd, &ps);
+            EndPaint(hWnd, &ps);
+            return 0;
+        }
+    }
+    return DefWindowProcA(hWnd, msg, wParam, lParam);
+}
+
 HWND CreateOverlay(int width, int height) {
-    // Используем ANSI версию FindWindowA
+    // Регистрируем класс окна
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = OverlayWndProc;
+    wc.hInstance = GetModuleHandleA(NULL);
+    wc.lpszClassName = "OverlayClass";
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    
+    if (!RegisterClassA(&wc)) {
+        std::cout << "[!] Не удалось зарегистрировать класс окна!" << std::endl;
+        return NULL;
+    }
+    
+    // Находим окно CS2
     HWND hGame = FindWindowA(NULL, "Counter-Strike 2");
     if (!hGame) {
         std::cout << "[!] Окно CS2 не найдено!" << std::endl;
@@ -187,10 +227,10 @@ HWND CreateOverlay(int width, int height) {
     RECT gameRect;
     GetWindowRect(hGame, &gameRect);
     
-    // Используем ANSI версию CreateWindowExA
+    // Создаем оверлей
     HWND hOverlay = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
-        "STATIC",
+        "OverlayClass",
         "Overlay",
         WS_POPUP,
         gameRect.left,
@@ -208,7 +248,10 @@ HWND CreateOverlay(int width, int height) {
         return NULL;
     }
     
+    // Делаем черный цвет прозрачным
     SetLayeredWindowAttributes(hOverlay, RGB(0, 0, 0), 0, LWA_COLORKEY);
+    
+    // Пропускаем клики
     SetWindowLong(hOverlay, GWL_EXSTYLE, 
         GetWindowLong(hOverlay, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_TRANSPARENT);
     
@@ -235,15 +278,15 @@ void UpdateOverlayPosition(HWND hOverlay) {
     );
 }
 
+// ============================================
+// ПАРСИНГ СМЕЩЕНИЙ
+// ============================================
+
 ViewMatrix GetViewMatrixFromMemory(HANDLE hProcess, uintptr_t clientBase, uintptr_t viewMatrixOffset) {
     ViewMatrix vm = {};
     ReadMemory(hProcess, clientBase + viewMatrixOffset, vm);
     return vm;
 }
-
-// ============================================
-// ПАРСИНГ СМЕЩЕНИЙ
-// ============================================
 
 bool RunCS2Dumper() {
     std::string cmd = "cs2-dumper.exe --output ./output";
@@ -372,8 +415,6 @@ Offsets GetOffsets() {
     std::cout << "   dwViewMatrix: 0x" << std::hex << offsets.dwViewMatrix << std::dec << std::endl;
     std::cout << "   m_iHealth: 0x" << std::hex << offsets.m_iHealth << std::dec << std::endl;
     std::cout << "   m_iTeamNum: 0x" << std::hex << offsets.m_iTeamNum << std::dec << std::endl;
-    std::cout << "   m_lifeState: 0x" << std::hex << offsets.m_lifeState << std::dec << std::endl;
-    std::cout << "   m_fFlags: 0x" << std::hex << offsets.m_fFlags << std::dec << std::endl;
     std::cout << "   m_vecOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
     
     return offsets;
@@ -445,6 +486,7 @@ int main() {
 
     std::cout << "=== CS2 ESP Overlay ===" << std::endl << std::endl;
     
+    // 1. Получаем смещения
     Offsets localOffsets = GetOffsets();
     if (localOffsets.dwEntityList == 0 || localOffsets.m_vecOrigin == 0) {
         std::cout << "[!] Не удалось получить смещения!" << std::endl;
@@ -453,6 +495,7 @@ int main() {
         return 1;
     }
 
+    // 2. Находим CS2
     DWORD pid = GetProcessIdByName(L"cs2.exe");
     if (pid == 0) {
         std::cout << "[!] CS2 не запущена!" << std::endl;
@@ -461,6 +504,7 @@ int main() {
     }
     std::cout << "1. [✓] CS2 PID: " << pid << std::endl;
 
+    // 3. Открываем процесс
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (hProcess == NULL) {
         std::cout << "[!] Не удалось открыть процесс! Запусти от администратора." << std::endl;
@@ -469,6 +513,7 @@ int main() {
     }
     std::cout << "2. [✓] Процесс открыт" << std::endl;
 
+    // 4. Получаем базу client.dll
     uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
     if (clientBase == 0) {
         std::cout << "[!] client.dll не найдена!" << std::endl;
@@ -478,25 +523,45 @@ int main() {
     }
     std::cout << "3. [✓] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
 
+    // 5. Получаем размер экрана
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     
-    HWND hOverlay = CreateOverlay(screenWidth, screenHeight);
-    if (!hOverlay) {
+    // 6. Создаем оверлей
+    g_hOverlay = CreateOverlay(screenWidth, screenHeight);
+    if (!g_hOverlay) {
         CloseHandle(hProcess);
         std::cin.get();
         return 1;
     }
     std::cout << "4. [✓] Оверлей создан" << std::endl;
 
-    std::cout << std::endl << "ESP запущен! Нажми Ctrl+C для выхода..." << std::endl;
-    std::cout << "(Если не видно ESP - проверь, что CS2 запущена в полноэкранном режиме)" << std::endl;
+    std::cout << std::endl << "ESP запущен! Нажми ESC для выхода..." << std::endl;
+    std::cout << "(Если не видно ESP - попробуй переключить CS2 в окно и обратно)" << std::endl;
 
-    while (true) {
-        UpdateOverlayPosition(hOverlay);
+    // 7. Основной цикл с обработкой сообщений
+    MSG msg = {};
+    
+    while (g_running) {
+        // Обрабатываем сообщения Windows (важно!)
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+            if (msg.message == WM_QUIT) {
+                g_running = false;
+                break;
+            }
+        }
         
+        if (!g_running) break;
+        
+        // Обновляем позицию оверлея
+        UpdateOverlayPosition(g_hOverlay);
+        
+        // Получаем ViewMatrix
         ViewMatrix vm = GetViewMatrixFromMemory(hProcess, clientBase, localOffsets.dwViewMatrix);
         
+        // Читаем локального игрока
         uintptr_t localPlayerPawn = 0;
         if (!ReadMemory(hProcess, clientBase + localOffsets.dwLocalPlayerPawn, localPlayerPawn)) {
             Sleep(16);
@@ -523,6 +588,7 @@ int main() {
         }
         localPlayer.isAlive = (localPlayer.health > 0);
         
+        // Читаем список сущностей
         uintptr_t entityList = 0;
         if (!ReadMemory(hProcess, clientBase + localOffsets.dwEntityList, entityList)) {
             Sleep(16);
@@ -570,21 +636,32 @@ int main() {
             players.push_back(player);
         }
         
-        HDC hdc = GetDC(hOverlay);
+        // Рисуем ESP
+        HDC hdc = GetDC(g_hOverlay);
         
+        // Очищаем оверлей
         RECT rect;
-        GetClientRect(hOverlay, &rect);
+        GetClientRect(g_hOverlay, &rect);
         HBRUSH clearBrush = CreateSolidBrush(RGB(0, 0, 0));
         FillRect(hdc, &rect, clearBrush);
         DeleteObject(clearBrush);
         
+        // Рисуем ESP
         DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight);
         
-        ReleaseDC(hOverlay, hdc);
+        ReleaseDC(g_hOverlay, hdc);
         
+        // Небольшая задержка
         Sleep(16);
     }
     
+    // Закрываем оверлей
+    if (g_hOverlay) {
+        DestroyWindow(g_hOverlay);
+        g_hOverlay = NULL;
+    }
+    
     CloseHandle(hProcess);
+    std::cout << "ESP остановлен." << std::endl;
     return 0;
 }
