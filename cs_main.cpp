@@ -66,14 +66,21 @@ HANDLE g_scannerProcess = NULL;
 
 bool WriteFileSafe(const std::string& filename, const std::string& data) {
     std::string tempFile = filename + ".tmp";
+    
+    // 1. Пишем во временный файл
     std::ofstream out(tempFile);
     if (!out.is_open()) return false;
     out << data;
     out.close();
     
+    // 2. Удаляем старый файл (если есть)
+    DeleteFileA(filename.c_str());
+    
+    // 3. Переименовываем временный в основной
     if (std::rename(tempFile.c_str(), filename.c_str()) != 0) {
         return false;
     }
+    
     return true;
 }
 
