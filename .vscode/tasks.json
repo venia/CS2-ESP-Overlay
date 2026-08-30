@@ -12,7 +12,8 @@
                 "${fileDirname}\\${fileBasenameNoExtension}.exe",
                 "-lgdi32",  
                 "-luser32",
-                "-lpsapi"
+                "-lpsapi",
+                "-static"
             ],
             "options": {
                 "cwd": "${fileDirname}"

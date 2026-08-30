@@ -1,5 +1,6 @@
 // pattern_scanning.cpp
-// Задача: найти смещения через сканирование памяти и сохранить в secret/poc.trs
+// Advanced Memory Scanner with Heuristic + Pattern Detection
+// Compiled: g++ -g pattern_scanning.cpp -o pattern_scanning.exe -lgdi32 -luser32 -lpsapi -static
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -10,15 +11,14 @@
 #include <fstream>
 #include <chrono>
 #include <thread>
-#include <json-c/json.h>  // Требуется установить: pacman -S mingw-w64-ucrt-x86_64-json-c
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+#include <map>
 
 // ============================================
-// СТРУКТУРЫ
+// STRUCTURES
 // ============================================
-
-struct Vector3 {
-    float x, y, z;
-};
 
 struct Offsets {
     uintptr_t dwEntityList;
@@ -30,8 +30,47 @@ struct Offsets {
     uintptr_t m_vecOrigin;
 };
 
+struct Candidate {
+    uintptr_t address;
+    int currentValue;
+    int previousValue;
+    int stableCount;
+    int type;          // 0 = int, 1 = short, 2 = float
+    int regionIndex;   // Which memory region
+    bool verified;     // Has been verified
+};
+
+struct MemoryRegion {
+    uintptr_t start;
+    uintptr_t end;
+    size_t size;
+    DWORD protect;
+    bool isReadable;
+};
+
+struct ScanStats {
+    int totalAttempts;
+    int totalCandidatesFound;
+    int currentCandidates;
+    int filteredOut;
+    int verifiedCount;
+    double scanTimeMs;
+    std::vector<int> candidatesHistory;
+};
+
 // ============================================
-// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// GLOBAL VARIABLES
+// ============================================
+
+std::vector<Candidate> g_candidates;
+std::vector<MemoryRegion> g_regions;
+ScanStats g_stats = {};
+bool g_found = false;
+Offsets g_foundOffsets = {};
+std::chrono::steady_clock::time_point g_scanStart;
+
+// ============================================
+// HELPER FUNCTIONS
 // ============================================
 
 DWORD GetProcessIdByName(const std::wstring& processName) {
@@ -87,24 +126,67 @@ bool IsValidAddress(uintptr_t address) {
 }
 
 // ============================================
-// БЕЗОПАСНАЯ РАБОТА С ФАЙЛАМИ
+// JSON PARSING (Simple)
 // ============================================
 
-bool WriteJsonToFile(const std::string& filename, const std::string& data) {
+int ExtractIntFromJSON(const std::string& json, const std::string& key) {
+    std::string searchKey = "\"" + key + "\":";
+    size_t pos = json.find(searchKey);
+    if (pos == std::string::npos) return 0;
+    
+    pos += searchKey.length();
+    while (pos < json.length() && (json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\n')) pos++;
+    
+    size_t endPos = pos;
+    while (endPos < json.length() && (isdigit(json[endPos]) || json[endPos] == '-')) endPos++;
+    
+    if (pos == endPos) return 0;
+    return std::stoi(json.substr(pos, endPos - pos));
+}
+
+std::string MakeResultJSON(const Offsets& offsets, const ScanStats& stats) {
+    std::stringstream ss;
+    ss << "{\n";
+    ss << "    \"timestamp\": \"" << std::chrono::system_clock::now().time_since_epoch().count() << "\",\n";
+    ss << "    \"status\": \"found\",\n";
+    ss << "    \"search_stats\": {\n";
+    ss << "        \"total_attempts\": " << stats.totalAttempts << ",\n";
+    ss << "        \"total_candidates_found\": " << stats.totalCandidatesFound << ",\n";
+    ss << "        \"final_candidates\": " << stats.currentCandidates << ",\n";
+    ss << "        \"filtered_out\": " << stats.filteredOut << ",\n";
+    ss << "        \"scan_time_ms\": " << stats.scanTimeMs << "\n";
+    ss << "    },\n";
+    ss << "    \"offsets\": {\n";
+    ss << "        \"dwEntityList\": " << offsets.dwEntityList << ",\n";
+    ss << "        \"dwLocalPlayerPawn\": " << offsets.dwLocalPlayerPawn << ",\n";
+    ss << "        \"dwLocalPlayerController\": " << offsets.dwLocalPlayerController << ",\n";
+    ss << "        \"dwViewMatrix\": " << offsets.dwViewMatrix << ",\n";
+    ss << "        \"m_iHealth\": " << offsets.m_iHealth << ",\n";
+    ss << "        \"m_iTeamNum\": " << offsets.m_iTeamNum << ",\n";
+    ss << "        \"m_vecOrigin\": " << offsets.m_vecOrigin << "\n";
+    ss << "    }\n";
+    ss << "}";
+    return ss.str();
+}
+
+// ============================================
+// FILE OPERATIONS (Atomic)
+// ============================================
+
+bool WriteFileSafe(const std::string& filename, const std::string& data) {
     std::string tempFile = filename + ".tmp";
     std::ofstream out(tempFile);
     if (!out.is_open()) return false;
     out << data;
     out.close();
     
-    // Атомарное переименование
     if (std::rename(tempFile.c_str(), filename.c_str()) != 0) {
         return false;
     }
     return true;
 }
 
-std::string ReadJsonFromFile(const std::string& filename) {
+std::string ReadFileSafe(const std::string& filename) {
     std::ifstream in(filename);
     if (!in.is_open()) return "";
     return std::string((std::istreambuf_iterator<char>(in)),
@@ -116,59 +198,142 @@ void CreateDirectoryIfNotExists(const std::string& path) {
 }
 
 // ============================================
-// СКАНИРОВАНИЕ ПАМЯТИ (ПОИСК ЗДОРОВЬЯ)
+// MEMORY REGION DETECTION
 // ============================================
 
-struct Candidate {
-    uintptr_t address;
-    int currentValue;
-    int previousValue;
-    int stableCount;
-};
+std::vector<MemoryRegion> GetReadableRegions(HANDLE hProcess, uintptr_t baseAddress, size_t maxSize) {
+    std::vector<MemoryRegion> regions;
+    uintptr_t currentAddress = baseAddress;
+    uintptr_t endAddress = baseAddress + maxSize;
+    
+    while (currentAddress < endAddress) {
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQueryEx(hProcess, (LPCVOID)currentAddress, &mbi, sizeof(mbi)) == 0) {
+            break;
+        }
+        
+        // Only regions that are committed and readable
+        if (mbi.State == MEM_COMMIT && 
+            (mbi.Protect & PAGE_READWRITE || mbi.Protect & PAGE_READONLY)) {
+            
+            MemoryRegion region;
+            region.start = (uintptr_t)mbi.BaseAddress;
+            region.end = region.start + mbi.RegionSize;
+            region.size = mbi.RegionSize;
+            region.protect = mbi.Protect;
+            region.isReadable = true;
+            regions.push_back(region);
+        }
+        
+        currentAddress = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+    }
+    
+    return regions;
+}
 
-std::vector<Candidate> candidates;
-int totalAttempts = 0;
+// ============================================
+// ADVANCED MEMORY SCANNING
+// ============================================
 
-// Первый проход: найти ВСЕ адреса с текущим здоровьем
-std::vector<uintptr_t> FindCandidates(HANDLE hProcess, uintptr_t startAddress, size_t size, int targetValue) {
-    std::vector<uintptr_t> result;
-    std::vector<BYTE> buffer(size);
+std::vector<Candidate> ScanRegionForValue(HANDLE hProcess, const MemoryRegion& region, 
+                                          int targetValue, int regionIndex) {
+    std::vector<Candidate> result;
+    std::vector<BYTE> buffer(region.size);
     SIZE_T bytesRead;
     
-    if (!ReadProcessMemory(hProcess, (LPCVOID)startAddress, buffer.data(), size, &bytesRead)) {
+    if (!ReadProcessMemory(hProcess, (LPCVOID)region.start, buffer.data(), region.size, &bytesRead)) {
         return result;
     }
     
-    for (size_t i = 0; i <= bytesRead - sizeof(int); i += sizeof(int)) {
+    // Scan as int (4 bytes)
+    for (size_t i = 0; i <= bytesRead - sizeof(int); i += 1) {
         int value = *(int*)(buffer.data() + i);
         if (value == targetValue) {
-            result.push_back(startAddress + i);
+            Candidate cand;
+            cand.address = region.start + i;
+            cand.currentValue = targetValue;
+            cand.previousValue = targetValue;
+            cand.stableCount = 0;
+            cand.type = 0; // int
+            cand.regionIndex = regionIndex;
+            cand.verified = false;
+            result.push_back(cand);
+        }
+    }
+    
+    // Scan as short (2 bytes)
+    for (size_t i = 0; i <= bytesRead - sizeof(short); i += 1) {
+        short value = *(short*)(buffer.data() + i);
+        if (value == targetValue) {
+            Candidate cand;
+            cand.address = region.start + i;
+            cand.currentValue = targetValue;
+            cand.previousValue = targetValue;
+            cand.stableCount = 0;
+            cand.type = 1; // short
+            cand.regionIndex = regionIndex;
+            cand.verified = false;
+            result.push_back(cand);
+        }
+    }
+    
+    // Scan as float (4 bytes) - only if value is in valid range
+    if (targetValue >= 0 && targetValue <= 100) {
+        float floatTarget = (float)targetValue;
+        for (size_t i = 0; i <= bytesRead - sizeof(float); i += 1) {
+            float value = *(float*)(buffer.data() + i);
+            // Check if float is close to target (with small epsilon)
+            if (std::abs(value - floatTarget) < 0.01f) {
+                Candidate cand;
+                cand.address = region.start + i;
+                cand.currentValue = (int)(value + 0.5f);
+                cand.previousValue = (int)(value + 0.5f);
+                cand.stableCount = 0;
+                cand.type = 2; // float
+                cand.regionIndex = regionIndex;
+                cand.verified = false;
+                result.push_back(cand);
+            }
         }
     }
     
     return result;
 }
 
-// Фильтрация кандидатов: оставить только те, где значение изменилось
 std::vector<Candidate> FilterCandidates(HANDLE hProcess, const std::vector<Candidate>& oldCandidates, int newValue) {
     std::vector<Candidate> result;
     
     for (const auto& cand : oldCandidates) {
-        int currentValue = 0;
-        if (ReadMemory(hProcess, cand.address, currentValue)) {
-            if (currentValue == newValue && currentValue != cand.previousValue) {
-                Candidate newCand = cand;
-                newCand.currentValue = currentValue;
-                newCand.previousValue = cand.currentValue;
-                newCand.stableCount = 0;
-                result.push_back(newCand);
-            } else if (currentValue == newValue && currentValue == cand.previousValue) {
-                // Значение стабильно
-                Candidate newCand = cand;
-                newCand.currentValue = currentValue;
-                newCand.previousValue = cand.currentValue;
-                newCand.stableCount = cand.stableCount + 1;
-                result.push_back(newCand);
+        if (cand.type == 0) {
+            int currentValue = 0;
+            if (ReadMemory(hProcess, cand.address, currentValue)) {
+                if (currentValue == newValue) {
+                    Candidate newCand = cand;
+                    newCand.currentValue = currentValue;
+                    newCand.previousValue = cand.currentValue;
+                    result.push_back(newCand);
+                }
+            }
+        } else if (cand.type == 1) {
+            short currentValue = 0;
+            if (ReadMemory(hProcess, cand.address, currentValue)) {
+                if (currentValue == newValue) {
+                    Candidate newCand = cand;
+                    newCand.currentValue = currentValue;
+                    newCand.previousValue = cand.currentValue;
+                    result.push_back(newCand);
+                }
+            }
+        } else if (cand.type == 2) {
+            float currentValue = 0;
+            if (ReadMemory(hProcess, cand.address, currentValue)) {
+                float floatTarget = (float)newValue;
+                if (std::abs(currentValue - floatTarget) < 0.01f) {
+                    Candidate newCand = cand;
+                    newCand.currentValue = (int)(currentValue + 0.5f);
+                    newCand.previousValue = cand.currentValue;
+                    result.push_back(newCand);
+                }
             }
         }
     }
@@ -177,168 +342,311 @@ std::vector<Candidate> FilterCandidates(HANDLE hProcess, const std::vector<Candi
 }
 
 // ============================================
-// ОСНОВНАЯ ЛОГИКА pattern_scanning.exe
+// VERIFICATION
+// ============================================
+
+bool VerifyCandidate(HANDLE hProcess, const Candidate& cand) {
+    // Check if value is in valid range
+    if (cand.currentValue < 0 || cand.currentValue > 100) {
+        return false;
+    }
+    
+    // Try to read as different types to see if it's consistent
+    int intValue = 0;
+    short shortValue = 0;
+    float floatValue = 0;
+    
+    if (ReadMemory(hProcess, cand.address, intValue)) {
+        if (intValue == cand.currentValue) {
+            return true;
+        }
+    }
+    
+    if (ReadMemory(hProcess, cand.address, shortValue)) {
+        if (shortValue == cand.currentValue) {
+            return true;
+        }
+    }
+    
+    if (ReadMemory(hProcess, cand.address, floatValue)) {
+        if ((int)(floatValue + 0.5f) == cand.currentValue) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
+// ============================================
+// DISPLAY FUNCTIONS
+// ============================================
+
+void PrintHeader() {
+    std::cout << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║     CS2 PATTERN SCANNER v3 - Advanced Memory Scanner       ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
+}
+
+void PrintStats() {
+    std::cout << "┌──────────────────────────────────────────────────────────────┐" << std::endl;
+    std::cout << "│ SCAN STATISTICS                                             │" << std::endl;
+    std::cout << "├──────────────────────────────────────────────────────────────┤" << std::endl;
+    std::cout << "│ Total Attempts     : " << std::setw(30) << std::left << g_stats.totalAttempts << "│" << std::endl;
+    std::cout << "│ Candidates Found   : " << std::setw(30) << std::left << g_stats.totalCandidatesFound << "│" << std::endl;
+    std::cout << "│ Current Candidates : " << std::setw(30) << std::left << g_stats.currentCandidates << "│" << std::endl;
+    std::cout << "│ Filtered Out       : " << std::setw(30) << std::left << g_stats.filteredOut << "│" << std::endl;
+    std::cout << "│ Verified Count     : " << std::setw(30) << std::left << g_stats.verifiedCount << "│" << std::endl;
+    std::cout << "│ Scan Time (ms)     : " << std::setw(30) << std::left << std::fixed << std::setprecision(2) << g_stats.scanTimeMs << "│" << std::endl;
+    std::cout << "└──────────────────────────────────────────────────────────────┘" << std::endl;
+}
+
+void PrintCandidates(const std::vector<Candidate>& candidates, int maxShow = 5) {
+    if (candidates.empty()) {
+        std::cout << "│ No candidates found                                       │" << std::endl;
+        return;
+    }
+    
+    std::cout << "┌──────────────────────────────────────────────────────────────┐" << std::endl;
+    std::cout << "│ CANDIDATES (" << candidates.size() << " total)                                   │" << std::endl;
+    std::cout << "├──────────────────────────────────────────────────────────────┤" << std::endl;
+    
+    int show = std::min((int)candidates.size(), maxShow);
+    for (int i = 0; i < show; i++) {
+        const auto& cand = candidates[i];
+        const char* typeName = cand.type == 0 ? "int" : (cand.type == 1 ? "short" : "float");
+        std::cout << "│ " << std::hex << "0x" << cand.address << std::dec 
+                  << " | val: " << std::setw(3) << cand.currentValue 
+                  << " | type: " << std::setw(5) << typeName
+                  << " | region: " << std::setw(3) << cand.regionIndex 
+                  << " | verified: " << (cand.verified ? "YES" : "NO ") << " │" << std::endl;
+    }
+    
+    if (candidates.size() > maxShow) {
+        std::cout << "│ ... and " << (candidates.size() - maxShow) << " more candidates                    │" << std::endl;
+    }
+    std::cout << "└──────────────────────────────────────────────────────────────┘" << std::endl;
+}
+
+// ============================================
+// MAIN
 // ============================================
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
     
-    std::cout << "=== Pattern Scanner (Runtime Scanning) ===" << std::endl << std::endl;
+    PrintHeader();
     
-    // 1. Создаем папку secret
     CreateDirectoryIfNotExists("secret");
     
-    // 2. Подключаемся к CS2
+    // Find CS2 process
     DWORD pid = GetProcessIdByName(L"cs2.exe");
     if (pid == 0) {
-        std::cout << "[!] CS2 не запущена!" << std::endl;
+        std::cout << "[ERROR] CS2 is not running!" << std::endl;
+        std::cout << "Press Enter to exit...";
         std::cin.get();
         return 1;
     }
-    std::cout << "1. [✓] CS2 PID: " << pid << std::endl;
+    std::cout << "[OK] CS2 PID: " << pid << std::endl;
     
+    // Open process
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
     if (hProcess == NULL) {
-        std::cout << "[!] Не удалось открыть процесс! Запусти от администратора." << std::endl;
+        std::cout << "[ERROR] Failed to open process! Run as Administrator." << std::endl;
         std::cin.get();
         return 1;
     }
-    std::cout << "2. [✓] Процесс открыт" << std::endl;
+    std::cout << "[OK] Process opened" << std::endl;
     
-    // 3. Получаем базу client.dll
+    // Get client.dll base
     uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
     if (clientBase == 0) {
-        std::cout << "[!] client.dll не найдена!" << std::endl;
+        std::cout << "[ERROR] client.dll not found!" << std::endl;
         CloseHandle(hProcess);
         std::cin.get();
         return 1;
     }
-    std::cout << "3. [✓] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
+    std::cout << "[OK] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
     
-    // 4. Получаем размер client.dll
+    // Get memory regions
     MEMORY_BASIC_INFORMATION mbi;
     size_t clientSize = 0;
     if (VirtualQueryEx(hProcess, (LPCVOID)clientBase, &mbi, sizeof(mbi))) {
         clientSize = mbi.RegionSize;
     }
-    std::cout << "4. [✓] Размер client.dll: 0x" << std::hex << clientSize << std::dec << " байт" << std::endl;
+    std::cout << "[OK] client.dll size: 0x" << std::hex << clientSize << std::dec << " bytes" << std::endl;
     
-    std::cout << std::endl << "Ожидание данных от cs_main.exe..." << std::endl;
-    std::cout << "Начни игру и получай урон для поиска!" << std::endl << std::endl;
+    // Get readable regions
+    g_regions = GetReadableRegions(hProcess, clientBase, clientSize);
+    std::cout << "[OK] Found " << g_regions.size() << " readable memory regions" << std::endl;
+    std::cout << std::endl;
     
-    // 5. Основной цикл сканирования
+    // Fallback offsets
+    g_foundOffsets.dwEntityList = 0x2571220;
+    g_foundOffsets.dwLocalPlayerPawn = 0x23C6268;
+    g_foundOffsets.dwLocalPlayerController = 0x23A0F30;
+    g_foundOffsets.dwViewMatrix = 0x23CB830;
+    g_foundOffsets.m_iHealth = 0x34C;
+    g_foundOffsets.m_iTeamNum = 0x3E7;
+    g_foundOffsets.m_vecOrigin = 0x80;
+    
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << "INSTRUCTIONS:" << std::endl;
+    std::cout << "1. Start a match with bots" << std::endl;
+    std::cout << "2. Take damage (change your health)" << std::endl;
+    std::cout << "3. Scanner will find the health offset automatically" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << std::endl;
+    
+    std::cout << "Waiting for data from cs_main.exe..." << std::endl;
+    std::cout << "Make sure cs_main.exe is running and writing to secret/ccs.trs" << std::endl;
+    std::cout << std::endl;
+    
     bool found = false;
-    Offsets foundOffsets = {};
     int lastHealth = -1;
-    int stableCount = 0;
+    bool firstScan = true;
+    int scanCount = 0;
+    bool hasInitialCandidates = false;
+    
+    g_scanStart = std::chrono::steady_clock::now();
     
     while (!found) {
-        // Читаем данные из secret/ccs.trs
-        std::string jsonData = ReadJsonFromFile("secret/ccs.trs");
+        std::string jsonData = ReadFileSafe("secret/ccs.trs");
         if (jsonData.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
         
-        // Парсим JSON (упрощенно, без библиотеки)
-        // В реальном коде используй jsoncpp или nlohmann/json
-        int currentHealth = 0;
-        size_t pos = jsonData.find("\"health\":");
-        if (pos != std::string::npos) {
-            currentHealth = std::stoi(jsonData.substr(pos + 9));
-        }
+        int currentHealth = ExtractIntFromJSON(jsonData, "health");
         
-        if (currentHealth == 0) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if (currentHealth == 0 || currentHealth > 100) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
         
-        // Если здоровье изменилось
-        if (currentHealth != lastHealth && lastHealth != -1) {
-            totalAttempts++;
+        scanCount++;
+        
+        // Health changed or first scan
+        if (currentHealth != lastHealth || firstScan) {
+            firstScan = false;
             
-            std::cout << "[*] Попытка #" << totalAttempts << " | Здоровье: " << lastHealth << " → " << currentHealth << std::endl;
+            if (lastHealth != -1 && currentHealth != lastHealth) {
+                g_stats.totalAttempts++;
+            }
             
-            if (candidates.empty()) {
-                // Первый поиск: находим все адреса с текущим здоровьем
-                std::cout << "[*] Первый поиск: сканируем " << (clientSize / 1024 / 1024) << " MB памяти..." << std::endl;
+            // First scan after health changed
+            if (g_candidates.empty() && lastHealth != -1 && !hasInitialCandidates) {
+                auto scanStart = std::chrono::steady_clock::now();
                 
-                auto addresses = FindCandidates(hProcess, clientBase, clientSize, currentHealth);
+                std::cout << "[SCAN] Starting memory scan for value: " << currentHealth << std::endl;
+                std::cout << "       Scanning " << g_regions.size() << " regions..." << std::endl;
                 
-                for (uintptr_t addr : addresses) {
-                    Candidate cand;
-                    cand.address = addr;
-                    cand.currentValue = currentHealth;
-                    cand.previousValue = lastHealth;
-                    cand.stableCount = 0;
-                    candidates.push_back(cand);
+                int totalFound = 0;
+                for (size_t i = 0; i < g_regions.size(); i++) {
+                    auto regionCandidates = ScanRegionForValue(hProcess, g_regions[i], currentHealth, (int)i);
+                    totalFound += regionCandidates.size();
+                    g_candidates.insert(g_candidates.end(), regionCandidates.begin(), regionCandidates.end());
                 }
                 
-                std::cout << "[*] Найдено " << candidates.size() << " кандидатов" << std::endl;
-            } else {
-                // Фильтруем кандидатов
-                auto filtered = FilterCandidates(hProcess, candidates, currentHealth);
-                candidates = filtered;
+                auto scanEnd = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(scanEnd - scanStart);
+                g_stats.scanTimeMs = (double)elapsed.count();
                 
-                std::cout << "[*] Осталось " << candidates.size() << " кандидатов" << std::endl;
+                g_stats.totalCandidatesFound = totalFound;
+                g_stats.currentCandidates = totalFound;
                 
-                // Если осталось 1 кандидат - он найден!
-                if (candidates.size() == 1) {
-                    uintptr_t healthAddress = candidates[0].address;
+                std::cout << "[SCAN] Found " << totalFound << " candidates" << std::endl;
+                std::cout << "[SCAN] Scan time: " << elapsed.count() << " ms" << std::endl;
+                std::cout << std::endl;
+                
+                hasInitialCandidates = true;
+                PrintStats();
+                PrintCandidates(g_candidates);
+                std::cout << std::endl;
+            }
+            // Filter candidates
+            else if (!g_candidates.empty() && currentHealth != lastHealth) {
+                auto oldSize = g_candidates.size();
+                
+                std::cout << "[FILTER] Filtering candidates from " << currentHealth << std::endl;
+                
+                g_candidates = FilterCandidates(hProcess, g_candidates, currentHealth);
+                g_stats.filteredOut += (oldSize - g_candidates.size());
+                g_stats.currentCandidates = g_candidates.size();
+                
+                // Verify remaining candidates
+                int verified = 0;
+                for (auto& cand : g_candidates) {
+                    if (VerifyCandidate(hProcess, cand)) {
+                        cand.verified = true;
+                        verified++;
+                    }
+                }
+                g_stats.verifiedCount = verified;
+                
+                std::cout << "[FILTER] Remaining: " << g_candidates.size() << " candidates" << std::endl;
+                std::cout << "[FILTER] Verified: " << verified << " candidates" << std::endl;
+                std::cout << std::endl;
+                
+                PrintStats();
+                PrintCandidates(g_candidates);
+                std::cout << std::endl;
+                
+                // Check if we found a single candidate
+                if (g_candidates.size() == 1) {
+                    uintptr_t healthAddress = g_candidates[0].address;
                     uintptr_t healthOffset = healthAddress - clientBase;
                     
-                    std::cout << "[✓] Здоровье найдено!" << std::endl;
-                    std::cout << "    Адрес: 0x" << std::hex << healthAddress << std::dec << std::endl;
-                    std::cout << "    Смещение: 0x" << std::hex << healthOffset << std::dec << std::endl;
+                    std::cout << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
+                    std::cout << "║                    HEALTH FOUND!                            ║" << std::endl;
+                    std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
+                    std::cout << "  Address  : 0x" << std::hex << healthAddress << std::dec << std::endl;
+                    std::cout << "  Offset   : 0x" << std::hex << healthOffset << std::dec << std::endl;
+                    std::cout << "  Type     : " << (g_candidates[0].type == 0 ? "int" : (g_candidates[0].type == 1 ? "short" : "float")) << std::endl;
+                    std::cout << "  Verified : YES" << std::endl;
+                    std::cout << std::endl;
                     
-                    // Сохраняем смещения
-                    foundOffsets.m_iHealth = healthOffset;
-                    foundOffsets.m_iTeamNum = 0x3E7;     // Запасное
-                    foundOffsets.m_vecOrigin = 0x80;     // Запасное
-                    foundOffsets.dwLocalPlayerPawn = 0x23C6268;  // Запасное
-                    foundOffsets.dwLocalPlayerController = 0x23A0F30;  // Запасное
-                    foundOffsets.dwViewMatrix = 0x23CB830;  // Запасное
-                    foundOffsets.dwEntityList = 0x2571220;  // Запасное
-                    
+                    g_foundOffsets.m_iHealth = healthOffset;
                     found = true;
                     break;
                 }
+                
+                // If we have few candidates but more than 1, show detailed info
+                if (g_candidates.size() > 1 && g_candidates.size() <= 10) {
+                    std::cout << "[INFO] Few candidates remaining. Try to change health again." << std::endl;
+                    std::cout << "       " << g_candidates.size() << " candidates left." << std::endl;
+                    std::cout << std::endl;
+                }
             }
+            
+            lastHealth = currentHealth;
         }
         
-        lastHealth = currentHealth;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     
-    // 6. Сохраняем результат в secret/poc.trs
+    // Save result
     if (found) {
-        std::string jsonResult = R"({
-    "timestamp": ")" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count()) + R"(",
-    "status": "found",
-    "search_stats": {
-        "total_attempts": )" + std::to_string(totalAttempts) + R"(,
-        "final_candidates": 1
-    },
-    "offsets": {
-        "dwEntityList": )" + std::to_string(foundOffsets.dwEntityList) + R"(,
-        "dwLocalPlayerPawn": )" + std::to_string(foundOffsets.dwLocalPlayerPawn) + R"(,
-        "dwLocalPlayerController": )" + std::to_string(foundOffsets.dwLocalPlayerController) + R"(,
-        "dwViewMatrix": )" + std::to_string(foundOffsets.dwViewMatrix) + R"(,
-        "m_iHealth": )" + std::to_string(foundOffsets.m_iHealth) + R"(,
-        "m_iTeamNum": )" + std::to_string(foundOffsets.m_iTeamNum) + R"(,
-        "m_vecOrigin": )" + std::to_string(foundOffsets.m_vecOrigin) + R"(
-    }
-})";
+        auto endTime = std::chrono::steady_clock::now();
+        auto totalTime = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - g_scanStart);
+        g_stats.scanTimeMs = (double)totalTime.count();
         
-        if (WriteJsonToFile("secret/poc.trs", jsonResult)) {
-            std::cout << "[✓] Результат сохранен в secret/poc.trs" << std::endl;
+        std::string jsonResult = MakeResultJSON(g_foundOffsets, g_stats);
+        
+        if (WriteFileSafe("secret/poc.trs", jsonResult)) {
+            std::cout << "[OK] Result saved to secret/poc.trs" << std::endl;
+            std::cout << std::endl;
+            std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+            std::cout << "FINAL STATISTICS:" << std::endl;
+            PrintStats();
+            std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
         } else {
-            std::cout << "[!] Не удалось сохранить результат!" << std::endl;
+            std::cout << "[ERROR] Failed to save result!" << std::endl;
         }
     }
     
-    std::cout << std::endl << "Нажми Enter для выхода...";
+    std::cout << std::endl << "Press Enter to exit...";
     std::cin.get();
     
     CloseHandle(hProcess);

@@ -1,5 +1,6 @@
 // cs_main.cpp
-// Задача: показать ESP, записывать данные в secret/ccs.trs, читать secret/poc.trs
+// ESP Overlay with Auto-Scanner
+// Compiled: g++ -g cs_main.cpp -o cs_main.exe -lgdi32 -luser32 -lpsapi -static
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -13,9 +14,10 @@
 #include <thread>
 #include <algorithm>
 #include <cstdlib>
+#include <cstring>
 
 // ============================================
-// СТРУКТУРЫ
+// STRUCTURES
 // ============================================
 
 struct Offsets {
@@ -48,7 +50,7 @@ struct PlayerInfo {
 };
 
 // ============================================
-// ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+// GLOBAL VARIABLES
 // ============================================
 
 HWND g_hOverlay = NULL;
@@ -56,12 +58,13 @@ bool g_running = true;
 Offsets g_offsets = {};
 bool g_offsetsFound = false;
 int g_searchAttempts = 0;
+HANDLE g_scannerProcess = NULL;
 
 // ============================================
-// БЕЗОПАСНАЯ РАБОТА С ФАЙЛАМИ
+// SAFE FILE OPERATIONS (Atomic)
 // ============================================
 
-bool WriteJsonToFile(const std::string& filename, const std::string& data) {
+bool WriteFileSafe(const std::string& filename, const std::string& data) {
     std::string tempFile = filename + ".tmp";
     std::ofstream out(tempFile);
     if (!out.is_open()) return false;
@@ -74,7 +77,7 @@ bool WriteJsonToFile(const std::string& filename, const std::string& data) {
     return true;
 }
 
-std::string ReadJsonFromFile(const std::string& filename) {
+std::string ReadFileSafe(const std::string& filename) {
     std::ifstream in(filename);
     if (!in.is_open()) return "";
     return std::string((std::istreambuf_iterator<char>(in)),
@@ -89,8 +92,13 @@ void DeleteFileIfExists(const std::string& filename) {
     DeleteFileA(filename.c_str());
 }
 
+bool FileExists(const std::string& filename) {
+    DWORD attrib = GetFileAttributesA(filename.c_str());
+    return (attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY));
+}
+
 // ============================================
-// БАЗОВЫЕ ФУНКЦИИ
+// BASE FUNCTIONS
 // ============================================
 
 DWORD GetProcessIdByName(const std::wstring& processName) {
@@ -146,36 +154,82 @@ bool IsValidAddress(uintptr_t address) {
 }
 
 // ============================================
-// ЗАПУСК pattern_scanning.exe
+// LAUNCH PATTERN SCANNER
 // ============================================
 
-bool StartPatternScanner() {
-    std::string cmd = "start /B pattern_scanning.exe";
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
+bool LaunchPatternScanner() {
+    std::cout << "[SCANNER] Launching pattern_scanning.exe..." << std::endl;
     
-    if (CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        CloseHandle(pi.hProcess);
+    // Get current directory
+    char currentDir[MAX_PATH];
+    GetCurrentDirectoryA(MAX_PATH, currentDir);
+    std::string scannerPath = std::string(currentDir) + "\\pattern_scanning.exe";
+    
+    // Check if scanner exists
+    if (!FileExists(scannerPath)) {
+        std::cout << "[ERROR] pattern_scanning.exe not found!" << std::endl;
+        std::cout << "       Expected path: " << scannerPath << std::endl;
+        return false;
+    }
+    
+    // Launch scanner as separate process (hidden window)
+    STARTUPINFOA si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;  // Hide the scanner window
+    
+    PROCESS_INFORMATION pi = {};
+    
+    std::string cmd = "\"" + scannerPath + "\"";
+    
+    if (CreateProcessA(
+        NULL,
+        (LPSTR)cmd.c_str(),
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NO_WINDOW,  // No window
+        NULL,
+        NULL,
+        &si,
+        &pi)) {
+        
+        g_scannerProcess = pi.hProcess;
         CloseHandle(pi.hThread);
-        std::cout << "[✓] pattern_scanning.exe запущен" << std::endl;
+        
+        std::cout << "[SCANNER] Started (PID: " << pi.dwProcessId << ")" << std::endl;
         return true;
     }
-    std::cout << "[!] Не удалось запустить pattern_scanning.exe!" << std::endl;
+    
+    std::cout << "[ERROR] Failed to start scanner: " << GetLastError() << std::endl;
     return false;
 }
 
+bool IsScannerRunning() {
+    if (g_scannerProcess == NULL) return false;
+    DWORD exitCode;
+    if (GetExitCodeProcess(g_scannerProcess, &exitCode)) {
+        return (exitCode == STILL_ACTIVE);
+    }
+    return false;
+}
+
+void WaitForScanner() {
+    if (g_scannerProcess == NULL) return;
+    WaitForSingleObject(g_scannerProcess, INFINITE);
+    CloseHandle(g_scannerProcess);
+    g_scannerProcess = NULL;
+}
+
 // ============================================
-// ЧТЕНИЕ СМЕЩЕНИЙ ИЗ poc.trs
+// READ OFFSETS FROM poc.trs
 // ============================================
 
 bool ReadOffsetsFromFile(Offsets& offsets) {
-    std::string jsonData = ReadJsonFromFile("secret/poc.trs");
+    std::string jsonData = ReadFileSafe("secret/poc.trs");
     if (jsonData.empty()) return false;
     
-    // Упрощенный парсинг JSON (без библиотеки)
-    // В реальном коде используй jsoncpp или nlohmann/json
     try {
-        // Ищем status
+        // Find status
         size_t statusPos = jsonData.find("\"status\":");
         if (statusPos != std::string::npos) {
             size_t endPos = jsonData.find(",", statusPos);
@@ -183,10 +237,9 @@ bool ReadOffsetsFromFile(Offsets& offsets) {
             if (status != "found") return false;
         }
         
-        // Ищем offsets
+        // Find offsets
         size_t offsetsPos = jsonData.find("\"offsets\":");
         if (offsetsPos != std::string::npos) {
-            // Ищем каждое смещение
             auto findOffset = [&](const std::string& name) -> uintptr_t {
                 size_t pos = jsonData.find("\"" + name + "\":");
                 if (pos == std::string::npos) return 0;
@@ -214,13 +267,12 @@ bool ReadOffsetsFromFile(Offsets& offsets) {
 }
 
 // ============================================
-// ПОЛУЧЕНИЕ ИГРОКОВ
+// GET PLAYERS
 // ============================================
 
 std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
     std::vector<PlayerInfo> players;
     
-    // Используем старый метод через entityList
     uintptr_t entityList = 0;
     if (!ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
         return players;
@@ -276,7 +328,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
 }
 
 // ============================================
-// ФУНКЦИИ РИСОВАНИЯ
+// RENDERING FUNCTIONS
 // ============================================
 
 bool WorldToScreen(Vector3 worldPos, Vector2& screenPos, ViewMatrix vm, int screenWidth, int screenHeight) {
@@ -363,7 +415,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
              ViewMatrix vm, int screenWidth, int screenHeight, bool offsetsFound, int attempts) {
     
     // ============================================
-    // ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+    // HEADER INFO
     // ============================================
     
     SetTextColor(hdc, RGB(0, 255, 0));
@@ -375,7 +427,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
     
     HFONT oldFont = (HFONT)SelectObject(hdc, debugFont);
     
-    // Тень
+    // Shadow
     SetTextColor(hdc, RGB(0, 0, 0));
     TextOutA(hdc, 9, 9, "ESP ACTIVE", 10);
     TextOutA(hdc, 11, 9, "ESP ACTIVE", 10);
@@ -387,7 +439,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
         TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
         
         char foundText[64];
-        sprintf(foundText, "✅ Параметры найдены! (%d попыток)", attempts);
+        sprintf(foundText, "[OK] Offsets Found! (%d attempts)", attempts);
         SetTextColor(hdc, RGB(0, 255, 0));
         TextOutA(hdc, 10, 35, foundText, (int)strlen(foundText));
     } else {
@@ -395,30 +447,42 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
         TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
         
         char searchingText[64];
-        sprintf(searchingText, "🔍 Поиск смещений... (попыток: %d)", attempts);
+        sprintf(searchingText, "[SCAN] Searching for offsets... (%d attempts)", attempts);
         SetTextColor(hdc, RGB(255, 255, 0));
         TextOutA(hdc, 10, 35, searchingText, (int)strlen(searchingText));
+        
+        // Show scanner status
+        if (g_scannerProcess != NULL) {
+            DWORD exitCode;
+            if (GetExitCodeProcess(g_scannerProcess, &exitCode)) {
+                if (exitCode == STILL_ACTIVE) {
+                    SetTextColor(hdc, RGB(0, 255, 255));
+                    TextOutA(hdc, 10, 60, "[SCANNER] Running...", 20);
+                }
+            }
+        }
     }
     
     char infoText[256];
     sprintf(infoText, "Players: %d | HP: %d | Team: %d", 
             (int)players.size(), localPlayer.health, localPlayer.team);
     
+    int yOffset = offsetsFound ? 60 : 85;
     SetTextColor(hdc, RGB(0, 255, 255));
-    TextOutA(hdc, 10, 60, infoText, (int)strlen(infoText));
+    TextOutA(hdc, 10, yOffset, infoText, (int)strlen(infoText));
     
     char posText[256];
     sprintf(posText, "Pos: (%.1f, %.1f, %.1f)", 
             localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
     
     SetTextColor(hdc, RGB(255, 255, 0));
-    TextOutA(hdc, 10, 85, posText, (int)strlen(posText));
+    TextOutA(hdc, 10, yOffset + 25, posText, (int)strlen(posText));
     
     SelectObject(hdc, oldFont);
     DeleteObject(debugFont);
     
     // ============================================
-    // РИСУЕМ ИГРОКОВ (только если есть смещения)
+    // PLAYER ESP (only if offsets found)
     // ============================================
     
     if (!offsetsFound) return;
@@ -453,7 +517,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
 }
 
 // ============================================
-// ОКНО ОВЕРЛЕЯ
+// OVERLAY WINDOW
 // ============================================
 
 LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -487,13 +551,13 @@ HWND CreateOverlay(int width, int height) {
     wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
     
     if (!RegisterClassA(&wc)) {
-        std::cout << "[!] Не удалось зарегистрировать класс окна!" << std::endl;
+        std::cout << "[ERROR] Failed to register window class!" << std::endl;
         return NULL;
     }
     
     HWND hGame = FindWindowA(NULL, "Counter-Strike 2");
     if (!hGame) {
-        std::cout << "[!] Окно CS2 не найдено!" << std::endl;
+        std::cout << "[ERROR] CS2 window not found!" << std::endl;
         return NULL;
     }
     
@@ -516,7 +580,7 @@ HWND CreateOverlay(int width, int height) {
     );
     
     if (!hOverlay) {
-        std::cout << "[!] Не удалось создать оверлей!" << std::endl;
+        std::cout << "[ERROR] Failed to create overlay!" << std::endl;
         return NULL;
     }
     
@@ -527,7 +591,7 @@ HWND CreateOverlay(int width, int height) {
     ShowWindow(hOverlay, SW_SHOW);
     UpdateWindow(hOverlay);
     
-    std::cout << "   [✓] Оверлей создан!" << std::endl;
+    std::cout << "[OK] Overlay created!" << std::endl;
     return hOverlay;
 }
 
@@ -547,10 +611,6 @@ void UpdateOverlayPosition(HWND hOverlay) {
     );
 }
 
-// ============================================
-// ViewMatrix
-// ============================================
-
 ViewMatrix GetViewMatrixFromMemory(HANDLE hProcess, uintptr_t clientBase, uintptr_t viewMatrixOffset) {
     ViewMatrix vm = {};
     ReadMemory(hProcess, clientBase + viewMatrixOffset, vm);
@@ -558,54 +618,58 @@ ViewMatrix GetViewMatrixFromMemory(HANDLE hProcess, uintptr_t clientBase, uintpt
 }
 
 // ============================================
-// ОСНОВНАЯ ПРОГРАММА
+// MAIN
 // ============================================
 
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    std::cout << "=== CS2 ESP Overlay (Auto-Scanner) ===" << std::endl << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║           CS2 ESP OVERLAY with Auto-Scanner                ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
+    std::cout << std::endl;
     
-    // 1. Создаем папку secret и очищаем файлы
+    // 1. Create secret folder and clean up
     CreateDirectoryIfNotExists("secret");
     DeleteFileIfExists("secret/ccs.trs");
-    DeleteFileIfExists("secret/poc.trs");
     
-    // 2. Находим CS2
+    // 2. Find CS2
     DWORD pid = GetProcessIdByName(L"cs2.exe");
     if (pid == 0) {
-        std::cout << "[!] CS2 не запущена!" << std::endl;
+        std::cout << "[ERROR] CS2 is not running!" << std::endl;
         std::cin.get();
         return 1;
     }
-    std::cout << "1. [✓] CS2 PID: " << pid << std::endl;
+    std::cout << "[OK] CS2 PID: " << pid << std::endl;
 
-    // 3. Открываем процесс
+    // 3. Open process
     HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (hProcess == NULL) {
-        std::cout << "[!] Не удалось открыть процесс! Запусти от администратора." << std::endl;
+        std::cout << "[ERROR] Failed to open process! Run as Administrator." << std::endl;
         std::cin.get();
         return 1;
     }
-    std::cout << "2. [✓] Процесс открыт" << std::endl;
+    std::cout << "[OK] Process opened" << std::endl;
 
-    // 4. Получаем базу client.dll
+    // 4. Get client.dll base
     uintptr_t clientBase = GetModuleBaseAddress(pid, L"client.dll");
     if (clientBase == 0) {
-        std::cout << "[!] client.dll не найдена!" << std::endl;
+        std::cout << "[ERROR] client.dll not found!" << std::endl;
         CloseHandle(hProcess);
         std::cin.get();
         return 1;
     }
-    std::cout << "3. [✓] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
+    std::cout << "[OK] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
 
-    // 5. Запускаем pattern_scanning.exe
-    if (!StartPatternScanner()) {
-        std::cout << "[!] Продолжаем без сканера (используем запасные смещения)" << std::endl;
+    // 5. Launch pattern scanner (as child process)
+    std::cout << std::endl;
+    if (!LaunchPatternScanner()) {
+        std::cout << "[WARNING] Scanner failed to start. Using fallback offsets." << std::endl;
     }
+    std::cout << std::endl;
 
-    // 6. Создаем оверлей
+    // 6. Create overlay
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     
@@ -615,17 +679,16 @@ int main() {
         std::cin.get();
         return 1;
     }
-    std::cout << "4. [✓] Оверлей создан" << std::endl;
+    std::cout << "[OK] Overlay created" << std::endl;
 
-    std::cout << std::endl << "ESP запущен! Нажми ESC для выхода..." << std::endl;
-    std::cout << "Начни игру и получай урон для поиска смещений!" << std::endl << std::endl;
+    std::cout << std::endl << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << "  ESP RUNNING - Press ESC to exit" << std::endl;
+    std::cout << "  Scanner is searching for offsets in background" << std::endl;
+    std::cout << "  Take damage in game to help the scanner!" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << std::endl;
 
-    // 7. Основной цикл
-    MSG msg = {};
-    int frameCount = 0;
-    auto lastWriteTime = std::chrono::steady_clock::now();
-    
-    // Запасные смещения (если сканер не сработает)
+    // 7. Fallback offsets
     Offsets fallbackOffsets = {};
     fallbackOffsets.dwEntityList = 0x2571220;
     fallbackOffsets.dwLocalPlayerPawn = 0x23C6268;
@@ -637,8 +700,13 @@ int main() {
     
     g_offsets = fallbackOffsets;
     
+    // 8. Main loop
+    MSG msg = {};
+    auto lastWriteTime = std::chrono::steady_clock::now();
+    auto lastScannerCheck = std::chrono::steady_clock::now();
+    
     while (g_running) {
-        // Обработка сообщений Windows
+        // Handle Windows messages
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
@@ -650,17 +718,16 @@ int main() {
         
         if (!g_running) break;
         
-        // Обновляем позицию оверлея
+        // Update overlay position
         UpdateOverlayPosition(g_hOverlay);
         
-        // Читаем локального игрока (даже без смещений, чтобы показывать статус)
+        // Read local player
         uintptr_t localPlayerPawn = 0;
         int localHealth = 0;
         int localTeam = 0;
         Vector3 localPos = {0, 0, 0};
         
         if (g_offsetsFound) {
-            // Используем найденные смещения
             ReadMemory(hProcess, clientBase + g_offsets.dwLocalPlayerPawn, localPlayerPawn);
             if (IsValidAddress(localPlayerPawn)) {
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
@@ -677,7 +744,6 @@ int main() {
                 }
             }
         } else {
-            // Пытаемся прочитать через запасные смещения
             ReadMemory(hProcess, clientBase + fallbackOffsets.dwLocalPlayerPawn, localPlayerPawn);
             if (IsValidAddress(localPlayerPawn)) {
                 ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iHealth, localHealth);
@@ -701,7 +767,7 @@ int main() {
         localPlayer.position = localPos;
         localPlayer.isAlive = (localHealth > 0 && localHealth <= 100);
         
-        // Читаем игроков (только если есть смещения)
+        // Get players and view matrix
         std::vector<PlayerInfo> players;
         ViewMatrix vm = {};
         
@@ -709,16 +775,15 @@ int main() {
             vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
             players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
         } else {
-            // Пробуем через запасные
             vm = GetViewMatrixFromMemory(hProcess, clientBase, fallbackOffsets.dwViewMatrix);
             players = GetPlayers(hProcess, clientBase, fallbackOffsets, localPlayer);
         }
         
         // ============================================
-        // ЗАПИСЬ В secret/ccs.trs (каждую секунду)
+        // WRITE TO secret/ccs.trs (every 500ms)
         // ============================================
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 1000) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 500) {
             lastWriteTime = now;
             
             std::stringstream json;
@@ -738,13 +803,12 @@ int main() {
             json << "    }\n";
             json << "}";
             
-            WriteJsonToFile("secret/ccs.trs", json.str());
-            
+            WriteFileSafe("secret/ccs.trs", json.str());
             g_searchAttempts++;
         }
         
         // ============================================
-        // ЧТЕНИЕ ИЗ secret/poc.trs (проверка, не найдены ли смещения)
+        // CHECK FOR poc.trs (offsets found)
         // ============================================
         if (!g_offsetsFound) {
             Offsets newOffsets = {};
@@ -752,14 +816,21 @@ int main() {
                 if (newOffsets.m_iHealth != 0) {
                     g_offsets = newOffsets;
                     g_offsetsFound = true;
-                    std::cout << "[✓] Смещения получены из secret/poc.trs!" << std::endl;
-                    std::cout << "   m_iHealth: 0x" << std::hex << g_offsets.m_iHealth << std::dec << std::endl;
+                    std::cout << std::endl;
+                    std::cout << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
+                    std::cout << "║                    OFFSETS FOUND!                         ║" << std::endl;
+                    std::cout << "╚══════════════════════════════════════════════════════════════╝" << std::endl;
+                    std::cout << "  m_iHealth      : 0x" << std::hex << g_offsets.m_iHealth << std::dec << std::endl;
+                    std::cout << "  dwEntityList   : 0x" << std::hex << g_offsets.dwEntityList << std::dec << std::endl;
+                    std::cout << "  dwViewMatrix   : 0x" << std::hex << g_offsets.dwViewMatrix << std::dec << std::endl;
+                    std::cout << "  ESP is now fully functional!" << std::endl;
+                    std::cout << std::endl;
                 }
             }
         }
         
         // ============================================
-        // РИСУЕМ ESP
+        // RENDER ESP
         // ============================================
         HDC hdc = GetDC(g_hOverlay);
         
@@ -778,11 +849,17 @@ int main() {
     }
     
     // ============================================
-    // ЗАКРЫТИЕ
+    // CLEANUP
     // ============================================
     
-    // Удаляем только ccs.trs, poc.trs оставляем для дебага
+    // Delete only ccs.trs, keep poc.trs for debugging
     DeleteFileIfExists("secret/ccs.trs");
+    
+    // Wait for scanner to finish if still running
+    if (g_scannerProcess != NULL) {
+        std::cout << "Waiting for scanner to finish..." << std::endl;
+        WaitForScanner();
+    }
     
     if (g_hOverlay) {
         DestroyWindow(g_hOverlay);
@@ -790,6 +867,6 @@ int main() {
     }
     
     CloseHandle(hProcess);
-    std::cout << "ESP остановлен." << std::endl;
+    std::cout << "ESP stopped." << std::endl;
     return 0;
 }
