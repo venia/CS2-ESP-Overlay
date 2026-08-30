@@ -55,6 +55,8 @@ struct ScanStats {
     int filteredOut;
     int verifiedCount;
     double scanTimeMs;
+    int regionsScanned;      
+    int totalRegions;        
     std::vector<int> candidatesHistory;
 };
 
@@ -435,6 +437,75 @@ void PrintCandidates(const std::vector<Candidate>& candidates, int maxShow = 5) 
     std::cout << "└──────────────────────────────────────────────────────────────┘" << std::endl;
 }
 
+void WriteProgressToFile(int currentHealth, int totalAttempts, int candidates, 
+                         int regionsScanned, int totalRegions, bool found) {
+    
+    // 1. Читаем существующий ccs.trs
+    std::string existingData = ReadFileSafe("secret/ccs.trs");
+    
+    // 2. Парсим team и position из существующего файла
+    int team = 0;
+    float posX = 0, posY = 0, posZ = 0;
+    
+    if (!existingData.empty()) {
+        // Извлекаем team
+        size_t teamPos = existingData.find("\"team\":");
+        if (teamPos != std::string::npos) {
+            teamPos = existingData.find(":", teamPos) + 1;
+            while (existingData[teamPos] == ' ' || existingData[teamPos] == '\n') teamPos++;
+            size_t endPos = existingData.find_first_of(",}", teamPos);
+            team = std::stoi(existingData.substr(teamPos, endPos - teamPos));
+        }
+        
+        // Извлекаем position
+        size_t xPos = existingData.find("\"x\":");
+        if (xPos != std::string::npos) {
+            xPos = existingData.find(":", xPos) + 1;
+            while (existingData[xPos] == ' ' || existingData[xPos] == '\n') xPos++;
+            size_t endPos = existingData.find_first_of(",}", xPos);
+            posX = std::stof(existingData.substr(xPos, endPos - xPos));
+        }
+        
+        size_t yPos = existingData.find("\"y\":");
+        if (yPos != std::string::npos) {
+            yPos = existingData.find(":", yPos) + 1;
+            while (existingData[yPos] == ' ' || existingData[yPos] == '\n') yPos++;
+            size_t endPos = existingData.find_first_of(",}", yPos);
+            posY = std::stof(existingData.substr(yPos, endPos - yPos));
+        }
+        
+        size_t zPos = existingData.find("\"z\":");
+        if (zPos != std::string::npos) {
+            zPos = existingData.find(":", zPos) + 1;
+            while (existingData[zPos] == ' ' || existingData[zPos] == '\n') zPos++;
+            size_t endPos = existingData.find_first_of(",}", zPos);
+            posZ = std::stof(existingData.substr(zPos, endPos - zPos));
+        }
+    }
+    
+    // 3. Формируем JSON с сохранением team и position
+    std::stringstream ss;
+    ss << "{\n";
+    ss << "    \"timestamp\": \"" << std::chrono::system_clock::now().time_since_epoch().count() << "\",\n";
+    ss << "    \"health\": " << currentHealth << ",\n";
+    ss << "    \"team\": " << team << ",\n";  // ← Сохраняем оригинальную команду!
+    ss << "    \"position\": {\n";
+    ss << "        \"x\": " << posX << ",\n";   // ← Сохраняем оригинальную позицию!
+    ss << "        \"y\": " << posY << ",\n";
+    ss << "        \"z\": " << posZ << "\n";
+    ss << "    },\n";
+    ss << "    \"search\": {\n";
+    ss << "        \"attempts\": " << totalAttempts << ",\n";
+    ss << "        \"status\": \"" << (found ? "found" : "scanning") << "\",\n";
+    ss << "        \"candidates\": " << candidates << ",\n";
+    ss << "        \"regions_scanned\": " << regionsScanned << ",\n";
+    ss << "        \"total_regions\": " << totalRegions << "\n";
+    ss << "    }\n";
+    ss << "}";
+    
+    WriteFileSafe("secret/ccs.trs", ss.str());
+}
+
 // ============================================
 // MAIN
 // ============================================
@@ -486,6 +557,7 @@ int main() {
     
     // Get readable regions
     g_regions = GetReadableRegions(hProcess, clientBase, clientSize);
+    g_stats.totalRegions = (int)g_regions.size();
     std::cout << "[OK] Found " << g_regions.size() << " readable memory regions" << std::endl;
     std::cout << std::endl;
     
@@ -554,6 +626,7 @@ int main() {
                     auto regionCandidates = ScanRegionForValue(hProcess, g_regions[i], currentHealth, (int)i);
                     totalFound += regionCandidates.size();
                     g_candidates.insert(g_candidates.end(), regionCandidates.begin(), regionCandidates.end());
+                    g_stats.regionsScanned = (int)i + 1;
                 }
                 
                 auto scanEnd = std::chrono::steady_clock::now();
@@ -631,6 +704,15 @@ int main() {
         }
         
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        WriteProgressToFile(
+            currentHealth,
+            g_stats.totalAttempts,
+            (int)g_candidates.size(),
+            g_stats.regionsScanned,
+            g_stats.totalRegions,
+            found
+        );
     }
     
     // Save result

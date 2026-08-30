@@ -49,6 +49,14 @@ struct PlayerInfo {
     bool isAlive;
 };
 
+struct ScanProgress {
+    int attempts;
+    int candidates;
+    int regionsScanned;   // ← НОВОЕ!
+    int totalRegions;     // ← НОВОЕ!
+    bool isScanning;
+};
+
 // ============================================
 // GLOBAL VARIABLES
 // ============================================
@@ -59,6 +67,7 @@ Offsets g_offsets = {};
 bool g_offsetsFound = false;
 int g_searchAttempts = 0;
 HANDLE g_scannerProcess = NULL;
+ScanProgress g_scanProgress = {0, 0, 0, 0, false};
 
 // ============================================
 // SAFE FILE OPERATIONS (Atomic)
@@ -273,6 +282,65 @@ bool ReadOffsetsFromFile(Offsets& offsets) {
     return false;
 }
 
+void UpdateScanProgress() {
+    std::string jsonData = ReadFileSafe("secret/ccs.trs");
+    if (jsonData.empty()) {
+        g_scanProgress.isScanning = false;
+        return;
+    }
+    
+    try {
+        // Read status
+        size_t statusPos = jsonData.find("\"status\":");
+        if (statusPos != std::string::npos) {
+            size_t startPos = jsonData.find("\"", statusPos + 9) + 1;
+            size_t endPos = jsonData.find("\"", startPos);
+            std::string status = jsonData.substr(startPos, endPos - startPos);
+            g_scanProgress.isScanning = (status == "scanning");
+        }
+        
+        // Read attempts
+        size_t attemptsPos = jsonData.find("\"attempts\":");
+        if (attemptsPos != std::string::npos) {
+            attemptsPos = jsonData.find(":", attemptsPos) + 1;
+            while (jsonData[attemptsPos] == ' ' || jsonData[attemptsPos] == '\n') attemptsPos++;
+            size_t endPos = jsonData.find_first_of(",}", attemptsPos);
+            g_scanProgress.attempts = std::stoi(jsonData.substr(attemptsPos, endPos - attemptsPos));
+            g_searchAttempts = g_scanProgress.attempts;
+        }
+        
+        // Read candidates
+        size_t candidatesPos = jsonData.find("\"candidates\":");
+        if (candidatesPos != std::string::npos) {
+            candidatesPos = jsonData.find(":", candidatesPos) + 1;
+            while (jsonData[candidatesPos] == ' ' || jsonData[candidatesPos] == '\n') candidatesPos++;
+            size_t endPos = jsonData.find_first_of(",}", candidatesPos);
+            g_scanProgress.candidates = std::stoi(jsonData.substr(candidatesPos, endPos - candidatesPos));
+        }
+        
+        // Read regions_scanned
+        size_t regionsScannedPos = jsonData.find("\"regions_scanned\":");
+        if (regionsScannedPos != std::string::npos) {
+            regionsScannedPos = jsonData.find(":", regionsScannedPos) + 1;
+            while (jsonData[regionsScannedPos] == ' ' || jsonData[regionsScannedPos] == '\n') regionsScannedPos++;
+            size_t endPos = jsonData.find_first_of(",}", regionsScannedPos);
+            g_scanProgress.regionsScanned = std::stoi(jsonData.substr(regionsScannedPos, endPos - regionsScannedPos));
+        }
+        
+        // Read total_regions
+        size_t totalRegionsPos = jsonData.find("\"total_regions\":");
+        if (totalRegionsPos != std::string::npos) {
+            totalRegionsPos = jsonData.find(":", totalRegionsPos) + 1;
+            while (jsonData[totalRegionsPos] == ' ' || jsonData[totalRegionsPos] == '\n') totalRegionsPos++;
+            size_t endPos = jsonData.find_first_of(",}", totalRegionsPos);
+            g_scanProgress.totalRegions = std::stoi(jsonData.substr(totalRegionsPos, endPos - totalRegionsPos));
+        }
+        
+    } catch (...) {
+        // Ignore parsing errors
+    }
+}
+
 // ============================================
 // GET PLAYERS
 // ============================================
@@ -419,7 +487,8 @@ void DrawText(HDC hdc, Vector2 screenPos, const char* text, COLORREF color, int 
 }
 
 void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& localPlayer, 
-             ViewMatrix vm, int screenWidth, int screenHeight, bool offsetsFound, int attempts) {
+             ViewMatrix vm, int screenWidth, int screenHeight, bool offsetsFound, 
+             const ScanProgress& progress) {
     
     // ============================================
     // HEADER INFO
@@ -446,7 +515,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
         TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
         
         char foundText[64];
-        sprintf(foundText, "[OK] Offsets Found! (%d attempts)", attempts);
+        sprintf(foundText, "[OK] Offsets Found! (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(0, 255, 0));
         TextOutA(hdc, 10, 35, foundText, (int)strlen(foundText));
     } else {
@@ -454,7 +523,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
         TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
         
         char searchingText[64];
-        sprintf(searchingText, "[SCAN] Searching for offsets... (%d attempts)", attempts);
+        sprintf(searchingText, "[SCAN] Searching for offsets... (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(255, 255, 0));
         TextOutA(hdc, 10, 35, searchingText, (int)strlen(searchingText));
         
@@ -469,18 +538,54 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
             }
         }
     }
+
+     // ============================================
+    // НОВЫЕ СТРОКИ ДЛЯ ПРОГРЕССА!
+    // ============================================
+    
+    if (!offsetsFound && progress.isScanning) {
+        int yOffset = 85;  // ← БАЗОВЫЙ ОТСТУП
+        
+        if (progress.totalRegions > 0) {
+            int percent = (progress.regionsScanned * 100) / progress.totalRegions;
+            char progressText[128];
+            sprintf(progressText, "[SCAN] Scanning memory... %d%% (%d/%d regions)", 
+                    percent, progress.regionsScanned, progress.totalRegions);
+            SetTextColor(hdc, RGB(0, 255, 255));  // Бирюзовый
+            TextOutA(hdc, 10, yOffset, progressText, (int)strlen(progressText));
+            yOffset += 25;  // ← СЛЕДУЮЩАЯ СТРОКА НИЖЕ!
+        } else {
+            char progressText[128];
+            sprintf(progressText, "[SCAN] Waiting for scanner data...");
+            SetTextColor(hdc, RGB(255, 255, 0));
+            TextOutA(hdc, 10, yOffset, progressText, (int)strlen(progressText));
+            yOffset += 25;
+        }
+        
+        char candidatesText[128];
+        sprintf(candidatesText, "Candidates: %d | Attempts: %d", 
+                progress.candidates, progress.attempts);
+        SetTextColor(hdc, RGB(255, 255, 0));  // Желтый
+        TextOutA(hdc, 10, yOffset, candidatesText, (int)strlen(candidatesText));
+        // yOffset += 25;  // ← НЕ НУЖНО, ПОТОМУ ЧТО ДАЛЬШЕ ИДЕТ infoText
+    }
+
+
+    // ============================================
+    // СТАРЫЕ СТРОКИ (Players, Pos - оставляем)
+    // ============================================
     
     char infoText[256];
     sprintf(infoText, "Players: %d | HP: %d | Team: %d", 
-            (int)players.size(), localPlayer.health, localPlayer.team);
+        (int)players.size(), localPlayer.health, localPlayer.team);
     
-    int yOffset = offsetsFound ? 60 : 85;
+    int yOffset = offsetsFound ? 60 : 110;
     SetTextColor(hdc, RGB(0, 255, 255));
     TextOutA(hdc, 10, yOffset, infoText, (int)strlen(infoText));
     
     char posText[256];
     sprintf(posText, "Pos: (%.1f, %.1f, %.1f)", 
-            localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
+        localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
     
     SetTextColor(hdc, RGB(255, 255, 0));
     TextOutA(hdc, 10, yOffset + 25, posText, (int)strlen(posText));
@@ -722,6 +827,8 @@ int main() {
                 break;
             }
         }
+
+        UpdateScanProgress();
         
         if (!g_running) break;
         
@@ -848,7 +955,7 @@ int main() {
         DeleteObject(clearBrush);
         
         DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight, 
-                g_offsetsFound, g_searchAttempts);
+        g_offsetsFound, g_scanProgress); 
         
         ReleaseDC(g_hOverlay, hdc);
         
