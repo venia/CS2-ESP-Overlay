@@ -22,6 +22,9 @@ struct Offsets {
     uintptr_t m_lifeState;
     uintptr_t m_fFlags;
     uintptr_t m_vecOrigin;
+    uintptr_t dwGameEntitySystem;
+    uintptr_t dwGameEntitySystem_highestEntityIndex;
+    uintptr_t dwLocalPlayerController;  // ← НОВОЕ СМЕЩЕНИЕ!
 };
 
 struct Vector3 {
@@ -146,6 +149,52 @@ void DrawText(HDC hdc, Vector2 screenPos, const char* text, COLORREF color, int 
 void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& localPlayer, 
              ViewMatrix vm, int screenWidth, int screenHeight) {
     
+    // Отладочная информация
+    SetTextColor(hdc, RGB(0, 255, 0));
+    SetBkMode(hdc, TRANSPARENT);
+    
+    HFONT debugFont = CreateFont(20, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Arial");
+    
+    HFONT oldFont = (HFONT)SelectObject(hdc, debugFont);
+    
+    SetTextColor(hdc, RGB(0, 0, 0));
+    TextOutA(hdc, 9, 9, "ESP ACTIVE", 10);
+    TextOutA(hdc, 11, 9, "ESP ACTIVE", 10);
+    TextOutA(hdc, 10, 8, "ESP ACTIVE", 10);
+    TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+    
+    SetTextColor(hdc, RGB(0, 255, 0));
+    TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+    
+    char infoText[256];
+    sprintf(infoText, "Players: %d | Local HP: %d | Team: %d", 
+            (int)players.size(), localPlayer.health, localPlayer.team);
+    
+    SetTextColor(hdc, RGB(0, 255, 255));
+    TextOutA(hdc, 10, 40, infoText, (int)strlen(infoText));
+    
+    char posText[256];
+    sprintf(posText, "Pos: (%.1f, %.1f, %.1f)", 
+            localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
+    
+    SetTextColor(hdc, RGB(255, 255, 0));
+    TextOutA(hdc, 10, 65, posText, (int)strlen(posText));
+    
+    // Тестовый квадрат в центре
+    HPEN testPen = CreatePen(PS_SOLID, 3, RGB(255, 0, 255));
+    HPEN oldPen2 = (HPEN)SelectObject(hdc, testPen);
+    HBRUSH oldBrush2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, screenWidth/2 - 50, screenHeight/2 - 50, screenWidth/2 + 50, screenHeight/2 + 50);
+    SelectObject(hdc, oldPen2);
+    SelectObject(hdc, oldBrush2);
+    DeleteObject(testPen);
+    
+    SelectObject(hdc, oldFont);
+    DeleteObject(debugFont);
+    
+    // Рисуем игроков
     for (const auto& player : players) {
         if (player.position.x == localPlayer.position.x && 
             player.position.y == localPlayer.position.y &&
@@ -179,7 +228,6 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
 // ОКНО ОВЕРЛЕЯ
 // ============================================
 
-// Оконная процедура для оверлея (обрабатывает сообщения)
 LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_DESTROY:
@@ -194,7 +242,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             }
             break;
         case WM_PAINT: {
-            // Просто подтверждаем, что окно перерисовано
             PAINTSTRUCT ps;
             BeginPaint(hWnd, &ps);
             EndPaint(hWnd, &ps);
@@ -205,7 +252,6 @@ LRESULT CALLBACK OverlayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 HWND CreateOverlay(int width, int height) {
-    // Регистрируем класс окна
     WNDCLASSA wc = {};
     wc.lpfnWndProc = OverlayWndProc;
     wc.hInstance = GetModuleHandleA(NULL);
@@ -217,7 +263,6 @@ HWND CreateOverlay(int width, int height) {
         return NULL;
     }
     
-    // Находим окно CS2
     HWND hGame = FindWindowA(NULL, "Counter-Strike 2");
     if (!hGame) {
         std::cout << "[!] Окно CS2 не найдено!" << std::endl;
@@ -227,7 +272,6 @@ HWND CreateOverlay(int width, int height) {
     RECT gameRect;
     GetWindowRect(hGame, &gameRect);
     
-    // Создаем оверлей
     HWND hOverlay = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_LAYERED,
         "OverlayClass",
@@ -248,10 +292,7 @@ HWND CreateOverlay(int width, int height) {
         return NULL;
     }
     
-    // Делаем черный цвет прозрачным
     SetLayeredWindowAttributes(hOverlay, RGB(0, 0, 0), 0, LWA_COLORKEY);
-    
-    // Пропускаем клики
     SetWindowLong(hOverlay, GWL_EXSTYLE, 
         GetWindowLong(hOverlay, GWL_EXSTYLE) | WS_EX_LAYERED | WS_EX_TRANSPARENT);
     
@@ -369,7 +410,10 @@ Offsets ParseOffsets(const std::string& filepath) {
                 
                 if (name == "dwEntityList") offsets.dwEntityList = addr;
                 else if (name == "dwLocalPlayerPawn") offsets.dwLocalPlayerPawn = addr;
+                else if (name == "dwLocalPlayerController") offsets.dwLocalPlayerController = addr;  // ← НОВОЕ!
                 else if (name == "dwViewMatrix") offsets.dwViewMatrix = addr;
+                else if (name == "dwGameEntitySystem") offsets.dwGameEntitySystem = addr;
+                else if (name == "dwGameEntitySystem_highestEntityIndex") offsets.dwGameEntitySystem_highestEntityIndex = addr;
             }
         }
     }
@@ -412,7 +456,9 @@ Offsets GetOffsets() {
     std::cout << "   [✓] Смещения получены!" << std::endl;
     std::cout << "   dwEntityList: 0x" << std::hex << offsets.dwEntityList << std::dec << std::endl;
     std::cout << "   dwLocalPlayerPawn: 0x" << std::hex << offsets.dwLocalPlayerPawn << std::dec << std::endl;
+    std::cout << "   dwLocalPlayerController: 0x" << std::hex << offsets.dwLocalPlayerController << std::dec << std::endl;
     std::cout << "   dwViewMatrix: 0x" << std::hex << offsets.dwViewMatrix << std::dec << std::endl;
+    std::cout << "   dwGameEntitySystem: 0x" << std::hex << offsets.dwGameEntitySystem << std::dec << std::endl;
     std::cout << "   m_iHealth: 0x" << std::hex << offsets.m_iHealth << std::dec << std::endl;
     std::cout << "   m_iTeamNum: 0x" << std::hex << offsets.m_iTeamNum << std::dec << std::endl;
     std::cout << "   m_vecOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
@@ -477,6 +523,146 @@ bool IsValidAddress(uintptr_t address) {
 }
 
 // ============================================
+// НОВАЯ ФУНКЦИЯ ДЛЯ ЧТЕНИЯ ИГРОКОВ (С КОНТРОЛЛЕРОМ)
+// ============================================
+
+std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
+    std::vector<PlayerInfo> players;
+    
+    // 1. Получаем список сущностей
+    std::vector<uintptr_t> entities;
+    
+    if (offsets.dwGameEntitySystem != 0) {
+        uintptr_t entitySystem = 0;
+        if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
+            return players;
+        }
+        
+        if (!IsValidAddress(entitySystem)) {
+            return players;
+        }
+        
+        int highestIndex = 0;
+        if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
+            ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
+        }
+        
+        int maxEntities = (highestIndex > 0 && highestIndex < 10000) ? highestIndex : 512;
+        
+        for (int i = 0; i < maxEntities; i++) {
+            uintptr_t listEntry = 0;
+            if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
+                continue;
+            }
+            
+            if (!IsValidAddress(listEntry)) {
+                continue;
+            }
+            
+            uintptr_t entity = 0;
+            if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
+                continue;
+            }
+            
+            if (IsValidAddress(entity)) {
+                entities.push_back(entity);
+            }
+        }
+    } else {
+        // Старый способ через entityList
+        uintptr_t entityList = 0;
+        if (!ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
+            return players;
+        }
+        
+        if (!IsValidAddress(entityList)) {
+            return players;
+        }
+        
+        for (int i = 0; i < 64; i++) {
+            uintptr_t entity = 0;
+            uintptr_t entry = entityList + (i + 1) * 0x10;
+            
+            if (!ReadMemory(hProcess, entry, entity)) {
+                continue;
+            }
+            
+            if (IsValidAddress(entity)) {
+                entities.push_back(entity);
+            }
+        }
+    }
+    
+    // 2. Для каждой сущности читаем данные
+    for (uintptr_t entity : entities) {
+        // Читаем здоровье
+        int health = 0;
+        ReadMemory(hProcess, entity + offsets.m_iHealth, health);
+        
+        if (health <= 0 || health > 100) {
+            continue;
+        }
+        
+        PlayerInfo player = {};
+        player.health = health;
+        player.isAlive = true;
+        
+        // Читаем позицию
+        if (offsets.m_vecOrigin == 0x80) {
+            uintptr_t sceneNode = 0;
+            ReadMemory(hProcess, entity + 0x330, sceneNode);
+            if (IsValidAddress(sceneNode)) {
+                ReadMemory(hProcess, sceneNode + 0x80, player.position);
+            }
+        } else {
+            ReadMemory(hProcess, entity + offsets.m_vecOrigin, player.position);
+        }
+        
+        // Читаем команду через Controller (если есть)
+        if (offsets.dwLocalPlayerController != 0) {
+            // Читаем Controller для этой сущности (смещение m_hController = 0x13D0 в C_BasePlayerPawn)
+            uintptr_t controllerHandle = 0;
+            if (ReadMemory(hProcess, entity + 0x13D0, controllerHandle)) {
+                // ControllerHandle & 0x7FFF = индекс
+                int controllerIndex = controllerHandle & 0x7FFF;
+                if (controllerIndex > 0 && controllerIndex < 10000) {
+                    // Читаем список контроллеров (dwEntityList + controllerIndex * 0x10)
+                    uintptr_t entityList = 0;
+                    if (ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
+                        uintptr_t controllerEntry = entityList + controllerIndex * 0x10;
+                        uintptr_t controller = 0;
+                        if (ReadMemory(hProcess, controllerEntry, controller)) {
+                            if (IsValidAddress(controller)) {
+                                // Читаем команду из контроллера (m_iTeamNum = 0x??)
+                                int team = 0;
+                                if (ReadMemory(hProcess, controller + offsets.m_iTeamNum, team)) {
+                                    player.team = team;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Если не получилось через Controller, пробуем через саму сущность
+        if (player.team == 0) {
+            int team = 0;
+            if (ReadMemory(hProcess, entity + offsets.m_iTeamNum, team)) {
+                player.team = team;
+            }
+        }
+        
+        // Проверяем, что это игрок (команда 2 или 3)
+        if (player.team == 2 || player.team == 3) {
+            players.push_back(player);
+        }
+    }
+    
+    return players;
+}
+
+// ============================================
 // ОСНОВНАЯ ПРОГРАММА
 // ============================================
 
@@ -537,13 +723,13 @@ int main() {
     std::cout << "4. [✓] Оверлей создан" << std::endl;
 
     std::cout << std::endl << "ESP запущен! Нажми ESC для выхода..." << std::endl;
-    std::cout << "(Если не видно ESP - попробуй переключить CS2 в окно и обратно)" << std::endl;
+    std::cout << "Для теста: запусти матч с ботами!" << std::endl;
 
-    // 7. Основной цикл с обработкой сообщений
+    // 7. Основной цикл
     MSG msg = {};
+    int frameCount = 0;
     
     while (g_running) {
-        // Обрабатываем сообщения Windows (важно!)
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
@@ -555,10 +741,8 @@ int main() {
         
         if (!g_running) break;
         
-        // Обновляем позицию оверлея
         UpdateOverlayPosition(g_hOverlay);
         
-        // Получаем ViewMatrix
         ViewMatrix vm = GetViewMatrixFromMemory(hProcess, clientBase, localOffsets.dwViewMatrix);
         
         // Читаем локального игрока
@@ -575,7 +759,6 @@ int main() {
         
         PlayerInfo localPlayer = {};
         ReadMemory(hProcess, localPlayerPawn + localOffsets.m_iHealth, localPlayer.health);
-        ReadMemory(hProcess, localPlayerPawn + localOffsets.m_iTeamNum, localPlayer.team);
         
         if (localOffsets.m_vecOrigin == 0x80) {
             uintptr_t sceneNode = 0;
@@ -588,74 +771,40 @@ int main() {
         }
         localPlayer.isAlive = (localPlayer.health > 0);
         
-        // Читаем список сущностей
-        uintptr_t entityList = 0;
-        if (!ReadMemory(hProcess, clientBase + localOffsets.dwEntityList, entityList)) {
-            Sleep(16);
-            continue;
-        }
-        
-        std::vector<PlayerInfo> players;
-        players.reserve(64);
-        
-        for (int i = 0; i < 64; i++) {
-            uintptr_t playerPawn = 0;
-            uintptr_t entityEntry = entityList + (i + 1) * 0x10;
-            
-            if (!ReadMemory(hProcess, entityEntry, playerPawn) || !IsValidAddress(playerPawn)) {
-                continue;
-            }
-            
-            PlayerInfo player = {};
-            
-            if (!ReadMemory(hProcess, playerPawn + localOffsets.m_iTeamNum, player.team)) {
-                continue;
-            }
-            
-            if (player.team != 2 && player.team != 3) {
-                continue;
-            }
-            
-            ReadMemory(hProcess, playerPawn + localOffsets.m_iHealth, player.health);
-            
-            if (player.health <= 0 || player.health > 100) {
-                continue;
-            }
-            player.isAlive = true;
-            
-            if (localOffsets.m_vecOrigin == 0x80) {
-                uintptr_t sceneNode = 0;
-                ReadMemory(hProcess, playerPawn + 0x330, sceneNode);
-                if (IsValidAddress(sceneNode)) {
-                    ReadMemory(hProcess, sceneNode + 0x80, player.position);
+        // Читаем команду локального игрока через Controller
+        localPlayer.team = 0;
+        if (localOffsets.dwLocalPlayerController != 0) {
+            uintptr_t controller = 0;
+            if (ReadMemory(hProcess, clientBase + localOffsets.dwLocalPlayerController, controller)) {
+                if (IsValidAddress(controller)) {
+                    ReadMemory(hProcess, controller + localOffsets.m_iTeamNum, localPlayer.team);
                 }
-            } else {
-                ReadMemory(hProcess, playerPawn + localOffsets.m_vecOrigin, player.position);
             }
-            
-            players.push_back(player);
         }
         
-        // Рисуем ESP
+        // Получаем игроков
+        auto players = GetPlayers(hProcess, clientBase, localOffsets, localPlayer);
+        
+        if (frameCount++ % 60 == 0) {
+            std::cout << "[DEBUG] Players found: " << players.size() 
+                      << " | Local team: " << localPlayer.team << std::endl;
+        }
+        
         HDC hdc = GetDC(g_hOverlay);
         
-        // Очищаем оверлей
         RECT rect;
         GetClientRect(g_hOverlay, &rect);
         HBRUSH clearBrush = CreateSolidBrush(RGB(0, 0, 0));
         FillRect(hdc, &rect, clearBrush);
         DeleteObject(clearBrush);
         
-        // Рисуем ESP
         DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight);
         
         ReleaseDC(g_hOverlay, hdc);
         
-        // Небольшая задержка
         Sleep(16);
     }
     
-    // Закрываем оверлей
     if (g_hOverlay) {
         DestroyWindow(g_hOverlay);
         g_hOverlay = NULL;
