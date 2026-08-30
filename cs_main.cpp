@@ -24,7 +24,7 @@ struct Offsets {
     uintptr_t m_vecOrigin;
     uintptr_t dwGameEntitySystem;
     uintptr_t dwGameEntitySystem_highestEntityIndex;
-    uintptr_t dwLocalPlayerController;  // ← НОВОЕ СМЕЩЕНИЕ!
+    uintptr_t dwLocalPlayerController;
 };
 
 struct Vector3 {
@@ -410,7 +410,7 @@ Offsets ParseOffsets(const std::string& filepath) {
                 
                 if (name == "dwEntityList") offsets.dwEntityList = addr;
                 else if (name == "dwLocalPlayerPawn") offsets.dwLocalPlayerPawn = addr;
-                else if (name == "dwLocalPlayerController") offsets.dwLocalPlayerController = addr;  // ← НОВОЕ!
+                else if (name == "dwLocalPlayerController") offsets.dwLocalPlayerController = addr;
                 else if (name == "dwViewMatrix") offsets.dwViewMatrix = addr;
                 else if (name == "dwGameEntitySystem") offsets.dwGameEntitySystem = addr;
                 else if (name == "dwGameEntitySystem_highestEntityIndex") offsets.dwGameEntitySystem_highestEntityIndex = addr;
@@ -523,88 +523,119 @@ bool IsValidAddress(uintptr_t address) {
 }
 
 // ============================================
-// НОВАЯ ФУНКЦИЯ ДЛЯ ЧТЕНИЯ ИГРОКОВ (С КОНТРОЛЛЕРОМ)
+// ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИГРОКОВ
 // ============================================
 
 std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
     std::vector<PlayerInfo> players;
     
-    // 1. Получаем список сущностей
-    std::vector<uintptr_t> entities;
-    
-    if (offsets.dwGameEntitySystem != 0) {
-        uintptr_t entitySystem = 0;
-        if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
-            return players;
-        }
-        
-        if (!IsValidAddress(entitySystem)) {
-            return players;
-        }
-        
-        int highestIndex = 0;
-        if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
-            ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
-        }
-        
-        int maxEntities = (highestIndex > 0 && highestIndex < 10000) ? highestIndex : 512;
-        
-        for (int i = 0; i < maxEntities; i++) {
-            uintptr_t listEntry = 0;
-            if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
-                continue;
-            }
-            
-            if (!IsValidAddress(listEntry)) {
-                continue;
-            }
-            
-            uintptr_t entity = 0;
-            if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
-                continue;
-            }
-            
-            if (IsValidAddress(entity)) {
-                entities.push_back(entity);
-            }
-        }
-    } else {
-        // Старый способ через entityList
-        uintptr_t entityList = 0;
-        if (!ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
-            return players;
-        }
-        
-        if (!IsValidAddress(entityList)) {
-            return players;
-        }
-        
-        for (int i = 0; i < 64; i++) {
-            uintptr_t entity = 0;
-            uintptr_t entry = entityList + (i + 1) * 0x10;
-            
-            if (!ReadMemory(hProcess, entry, entity)) {
-                continue;
-            }
-            
-            if (IsValidAddress(entity)) {
-                entities.push_back(entity);
-            }
-        }
+    // 1. Читаем GameEntitySystem
+    uintptr_t entitySystem = 0;
+    if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
+        return players;
     }
     
-    // 2. Для каждой сущности читаем данные
-    for (uintptr_t entity : entities) {
+    if (!IsValidAddress(entitySystem)) {
+        return players;
+    }
+    
+    // 2. Читаем highestIndex
+    int highestIndex = 0;
+    ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);
+    
+    if (highestIndex == 0 || highestIndex > 10000) {
+        highestIndex = 512;
+    }
+    
+    static int debugCount = 0;
+    if (debugCount++ % 60 == 0) {
+        std::cout << "[DEBUG] entitySystem: 0x" << std::hex << entitySystem 
+                  << " | highestIndex: " << std::dec << highestIndex << std::endl;
+    }
+    
+    // 3. Проходим по сущностям
+    int validPlayers = 0;
+    int team2Count = 0;
+    int team3Count = 0;
+    
+    for (int i = 0; i < highestIndex; i++) {
+        uintptr_t listEntry = 0;
+        if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
+            continue;
+        }
+        
+        if (!IsValidAddress(listEntry)) {
+            continue;
+        }
+        
+        uintptr_t entity = 0;
+        if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
+            continue;
+        }
+        
+        if (!IsValidAddress(entity)) {
+            continue;
+        }
+        
         // Читаем здоровье
         int health = 0;
-        ReadMemory(hProcess, entity + offsets.m_iHealth, health);
+        if (!ReadMemory(hProcess, entity + offsets.m_iHealth, health)) {
+            continue;
+        }
         
         if (health <= 0 || health > 100) {
             continue;
         }
         
+        // ЧИТАЕМ КОМАНДУ ЧЕРЕЗ CONTROLLER
+        int team = 0;
+        
+        // Смещение m_hController в C_BasePlayerPawn = 0x13D0
+        uintptr_t controllerHandle = 0;
+        if (ReadMemory(hProcess, entity + 0x13D0, controllerHandle)) {
+            if (controllerHandle != 0) {
+                int controllerIndex = controllerHandle & 0x7FFF;
+                
+                if (controllerIndex > 0 && controllerIndex < 10000) {
+                    uintptr_t entityList = 0;
+                    if (ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
+                        if (IsValidAddress(entityList)) {
+                            uintptr_t controllerEntry = entityList + controllerIndex * 0x10;
+                            uintptr_t controller = 0;
+                            if (ReadMemory(hProcess, controllerEntry, controller)) {
+                                if (IsValidAddress(controller)) {
+                                    if (ReadMemory(hProcess, controller + offsets.m_iTeamNum, team)) {
+                                        // team = 2 или 3 для игроков
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Если не получилось через Controller, пробуем через саму сущность
+        if (team == 0) {
+            ReadMemory(hProcess, entity + offsets.m_iTeamNum, team);
+        }
+        
+        // Если команда все еще 0 - пропускаем (не игрок)
+        if (team == 0) {
+            continue;
+        }
+        
+        // Только игроки (команда 2 или 3)
+        if (team != 2 && team != 3) {
+            continue;
+        }
+        
+        if (team == 2) team2Count++;
+        if (team == 3) team3Count++;
+        
         PlayerInfo player = {};
         player.health = health;
+        player.team = team;
         player.isAlive = true;
         
         // Читаем позицию
@@ -618,45 +649,21 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
             ReadMemory(hProcess, entity + offsets.m_vecOrigin, player.position);
         }
         
-        // Читаем команду через Controller (если есть)
-        if (offsets.dwLocalPlayerController != 0) {
-            // Читаем Controller для этой сущности (смещение m_hController = 0x13D0 в C_BasePlayerPawn)
-            uintptr_t controllerHandle = 0;
-            if (ReadMemory(hProcess, entity + 0x13D0, controllerHandle)) {
-                // ControllerHandle & 0x7FFF = индекс
-                int controllerIndex = controllerHandle & 0x7FFF;
-                if (controllerIndex > 0 && controllerIndex < 10000) {
-                    // Читаем список контроллеров (dwEntityList + controllerIndex * 0x10)
-                    uintptr_t entityList = 0;
-                    if (ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
-                        uintptr_t controllerEntry = entityList + controllerIndex * 0x10;
-                        uintptr_t controller = 0;
-                        if (ReadMemory(hProcess, controllerEntry, controller)) {
-                            if (IsValidAddress(controller)) {
-                                // Читаем команду из контроллера (m_iTeamNum = 0x??)
-                                int team = 0;
-                                if (ReadMemory(hProcess, controller + offsets.m_iTeamNum, team)) {
-                                    player.team = team;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // Проверяем, не локальный ли это игрок
+        if (player.position.x == localPlayer.position.x && 
+            player.position.y == localPlayer.position.y &&
+            player.position.z == localPlayer.position.z) {
+            continue;
         }
         
-        // Если не получилось через Controller, пробуем через саму сущность
-        if (player.team == 0) {
-            int team = 0;
-            if (ReadMemory(hProcess, entity + offsets.m_iTeamNum, team)) {
-                player.team = team;
-            }
-        }
-        
-        // Проверяем, что это игрок (команда 2 или 3)
-        if (player.team == 2 || player.team == 3) {
-            players.push_back(player);
-        }
+        players.push_back(player);
+        validPlayers++;
+    }
+    
+    if (debugCount % 60 == 0) {
+        std::cout << "[DEBUG] Team 2: " << team2Count 
+                  << " | Team 3: " << team3Count 
+                  << " | Valid players: " << validPlayers << std::endl;
     }
     
     return players;
