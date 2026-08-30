@@ -1,3 +1,6 @@
+// cs_main.cpp
+// Задача: показать ESP, записывать данные в secret/ccs.trs, читать secret/poc.trs
+
 #include <windows.h>
 #include <tlhelp32.h>
 #include <psapi.h>
@@ -6,8 +9,10 @@
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <chrono>
+#include <thread>
 #include <algorithm>
-#include <regex>
+#include <cstdlib>
 
 // ============================================
 // СТРУКТУРЫ
@@ -16,15 +21,11 @@
 struct Offsets {
     uintptr_t dwEntityList;
     uintptr_t dwLocalPlayerPawn;
+    uintptr_t dwLocalPlayerController;
     uintptr_t dwViewMatrix;
     uintptr_t m_iHealth;
     uintptr_t m_iTeamNum;
-    uintptr_t m_lifeState;
-    uintptr_t m_fFlags;
     uintptr_t m_vecOrigin;
-    uintptr_t dwGameEntitySystem;
-    uintptr_t dwGameEntitySystem_highestEntityIndex;
-    uintptr_t dwLocalPlayerController;
 };
 
 struct Vector3 {
@@ -52,15 +53,227 @@ struct PlayerInfo {
 
 HWND g_hOverlay = NULL;
 bool g_running = true;
+Offsets g_offsets = {};
+bool g_offsetsFound = false;
+int g_searchAttempts = 0;
 
 // ============================================
-// ПРОТОТИПЫ ФУНКЦИЙ
+// БЕЗОПАСНАЯ РАБОТА С ФАЙЛАМИ
 // ============================================
+
+bool WriteJsonToFile(const std::string& filename, const std::string& data) {
+    std::string tempFile = filename + ".tmp";
+    std::ofstream out(tempFile);
+    if (!out.is_open()) return false;
+    out << data;
+    out.close();
+    
+    if (std::rename(tempFile.c_str(), filename.c_str()) != 0) {
+        return false;
+    }
+    return true;
+}
+
+std::string ReadJsonFromFile(const std::string& filename) {
+    std::ifstream in(filename);
+    if (!in.is_open()) return "";
+    return std::string((std::istreambuf_iterator<char>(in)),
+                        std::istreambuf_iterator<char>());
+}
+
+void CreateDirectoryIfNotExists(const std::string& path) {
+    CreateDirectoryA(path.c_str(), NULL);
+}
+
+void DeleteFileIfExists(const std::string& filename) {
+    DeleteFileA(filename.c_str());
+}
+
+// ============================================
+// БАЗОВЫЕ ФУНКЦИИ
+// ============================================
+
+DWORD GetProcessIdByName(const std::wstring& processName) {
+    DWORD processId = 0;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W processEntry;
+        processEntry.dwSize = sizeof(processEntry);
+        
+        if (Process32FirstW(snapshot, &processEntry)) {
+            do {
+                if (_wcsicmp(processName.c_str(), processEntry.szExeFile) == 0) {
+                    processId = processEntry.th32ProcessID;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &processEntry));
+        }
+        CloseHandle(snapshot);
+    }
+    return processId;
+}
+
+uintptr_t GetModuleBaseAddress(DWORD pid, const std::wstring& moduleName) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
+    
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        MODULEENTRY32W moduleEntry;
+        moduleEntry.dwSize = sizeof(moduleEntry);
+        
+        if (Module32FirstW(snapshot, &moduleEntry)) {
+            do {
+                if (_wcsicmp(moduleName.c_str(), moduleEntry.szModule) == 0) {
+                    CloseHandle(snapshot);
+                    return (uintptr_t)moduleEntry.modBaseAddr;
+                }
+            } while (Module32NextW(snapshot, &moduleEntry));
+        }
+        CloseHandle(snapshot);
+    }
+    return 0;
+}
 
 template<typename T>
-bool ReadMemory(HANDLE process, uintptr_t address, T& value);
-bool IsValidAddress(uintptr_t address);
-bool WorldToScreen(Vector3 worldPos, Vector2& screenPos, ViewMatrix vm, int screenWidth, int screenHeight);
+bool ReadMemory(HANDLE process, uintptr_t address, T& value) {
+    SIZE_T bytesRead;
+    return ReadProcessMemory(process, (LPCVOID)address, &value, sizeof(T), &bytesRead) 
+           && bytesRead == sizeof(T);
+}
+
+bool IsValidAddress(uintptr_t address) {
+    return address > 0x10000 && address < 0x7FFFFFFF0000;
+}
+
+// ============================================
+// ЗАПУСК pattern_scanning.exe
+// ============================================
+
+bool StartPatternScanner() {
+    std::string cmd = "start /B pattern_scanning.exe";
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    
+    if (CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        std::cout << "[✓] pattern_scanning.exe запущен" << std::endl;
+        return true;
+    }
+    std::cout << "[!] Не удалось запустить pattern_scanning.exe!" << std::endl;
+    return false;
+}
+
+// ============================================
+// ЧТЕНИЕ СМЕЩЕНИЙ ИЗ poc.trs
+// ============================================
+
+bool ReadOffsetsFromFile(Offsets& offsets) {
+    std::string jsonData = ReadJsonFromFile("secret/poc.trs");
+    if (jsonData.empty()) return false;
+    
+    // Упрощенный парсинг JSON (без библиотеки)
+    // В реальном коде используй jsoncpp или nlohmann/json
+    try {
+        // Ищем status
+        size_t statusPos = jsonData.find("\"status\":");
+        if (statusPos != std::string::npos) {
+            size_t endPos = jsonData.find(",", statusPos);
+            std::string status = jsonData.substr(statusPos + 10, endPos - statusPos - 11);
+            if (status != "found") return false;
+        }
+        
+        // Ищем offsets
+        size_t offsetsPos = jsonData.find("\"offsets\":");
+        if (offsetsPos != std::string::npos) {
+            // Ищем каждое смещение
+            auto findOffset = [&](const std::string& name) -> uintptr_t {
+                size_t pos = jsonData.find("\"" + name + "\":");
+                if (pos == std::string::npos) return 0;
+                pos = jsonData.find(":", pos) + 1;
+                while (jsonData[pos] == ' ') pos++;
+                size_t endPos = jsonData.find_first_of(",}", pos);
+                return std::stoull(jsonData.substr(pos, endPos - pos), nullptr, 10);
+            };
+            
+            offsets.dwEntityList = findOffset("dwEntityList");
+            offsets.dwLocalPlayerPawn = findOffset("dwLocalPlayerPawn");
+            offsets.dwLocalPlayerController = findOffset("dwLocalPlayerController");
+            offsets.dwViewMatrix = findOffset("dwViewMatrix");
+            offsets.m_iHealth = findOffset("m_iHealth");
+            offsets.m_iTeamNum = findOffset("m_iTeamNum");
+            offsets.m_vecOrigin = findOffset("m_vecOrigin");
+            
+            return true;
+        }
+    } catch (...) {
+        return false;
+    }
+    
+    return false;
+}
+
+// ============================================
+// ПОЛУЧЕНИЕ ИГРОКОВ
+// ============================================
+
+std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
+    std::vector<PlayerInfo> players;
+    
+    // Используем старый метод через entityList
+    uintptr_t entityList = 0;
+    if (!ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
+        return players;
+    }
+    
+    if (!IsValidAddress(entityList)) {
+        return players;
+    }
+    
+    for (int i = 0; i < 64; i++) {
+        uintptr_t playerPawn = 0;
+        uintptr_t entityEntry = entityList + (i + 1) * 0x10;
+        
+        if (!ReadMemory(hProcess, entityEntry, playerPawn) || !IsValidAddress(playerPawn)) {
+            continue;
+        }
+        
+        int health = 0;
+        if (!ReadMemory(hProcess, playerPawn + offsets.m_iHealth, health)) {
+            continue;
+        }
+        
+        if (health <= 0 || health > 100) {
+            continue;
+        }
+        
+        int team = 0;
+        ReadMemory(hProcess, playerPawn + offsets.m_iTeamNum, team);
+        
+        if (team != 2 && team != 3) {
+            continue;
+        }
+        
+        PlayerInfo player = {};
+        player.health = health;
+        player.team = team;
+        player.isAlive = true;
+        
+        if (offsets.m_vecOrigin == 0x80) {
+            uintptr_t sceneNode = 0;
+            ReadMemory(hProcess, playerPawn + 0x330, sceneNode);
+            if (IsValidAddress(sceneNode)) {
+                ReadMemory(hProcess, sceneNode + 0x80, player.position);
+            }
+        } else {
+            ReadMemory(hProcess, playerPawn + offsets.m_vecOrigin, player.position);
+        }
+        
+        players.push_back(player);
+    }
+    
+    return players;
+}
 
 // ============================================
 // ФУНКЦИИ РИСОВАНИЯ
@@ -147,9 +360,12 @@ void DrawText(HDC hdc, Vector2 screenPos, const char* text, COLORREF color, int 
 }
 
 void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& localPlayer, 
-             ViewMatrix vm, int screenWidth, int screenHeight) {
+             ViewMatrix vm, int screenWidth, int screenHeight, bool offsetsFound, int attempts) {
     
-    // Отладочная информация
+    // ============================================
+    // ОТЛАДОЧНАЯ ИНФОРМАЦИЯ
+    // ============================================
+    
     SetTextColor(hdc, RGB(0, 255, 0));
     SetBkMode(hdc, TRANSPARENT);
     
@@ -159,42 +375,54 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
     
     HFONT oldFont = (HFONT)SelectObject(hdc, debugFont);
     
+    // Тень
     SetTextColor(hdc, RGB(0, 0, 0));
     TextOutA(hdc, 9, 9, "ESP ACTIVE", 10);
     TextOutA(hdc, 11, 9, "ESP ACTIVE", 10);
     TextOutA(hdc, 10, 8, "ESP ACTIVE", 10);
     TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
     
-    SetTextColor(hdc, RGB(0, 255, 0));
-    TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+    if (offsetsFound) {
+        SetTextColor(hdc, RGB(0, 255, 0));
+        TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+        
+        char foundText[64];
+        sprintf(foundText, "✅ Параметры найдены! (%d попыток)", attempts);
+        SetTextColor(hdc, RGB(0, 255, 0));
+        TextOutA(hdc, 10, 35, foundText, (int)strlen(foundText));
+    } else {
+        SetTextColor(hdc, RGB(255, 255, 0));
+        TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+        
+        char searchingText[64];
+        sprintf(searchingText, "🔍 Поиск смещений... (попыток: %d)", attempts);
+        SetTextColor(hdc, RGB(255, 255, 0));
+        TextOutA(hdc, 10, 35, searchingText, (int)strlen(searchingText));
+    }
     
     char infoText[256];
-    sprintf(infoText, "Players: %d | Local HP: %d | Team: %d", 
+    sprintf(infoText, "Players: %d | HP: %d | Team: %d", 
             (int)players.size(), localPlayer.health, localPlayer.team);
     
     SetTextColor(hdc, RGB(0, 255, 255));
-    TextOutA(hdc, 10, 40, infoText, (int)strlen(infoText));
+    TextOutA(hdc, 10, 60, infoText, (int)strlen(infoText));
     
     char posText[256];
     sprintf(posText, "Pos: (%.1f, %.1f, %.1f)", 
             localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
     
     SetTextColor(hdc, RGB(255, 255, 0));
-    TextOutA(hdc, 10, 65, posText, (int)strlen(posText));
-    
-    // Тестовый квадрат в центре
-    HPEN testPen = CreatePen(PS_SOLID, 3, RGB(255, 0, 255));
-    HPEN oldPen2 = (HPEN)SelectObject(hdc, testPen);
-    HBRUSH oldBrush2 = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, screenWidth/2 - 50, screenHeight/2 - 50, screenWidth/2 + 50, screenHeight/2 + 50);
-    SelectObject(hdc, oldPen2);
-    SelectObject(hdc, oldBrush2);
-    DeleteObject(testPen);
+    TextOutA(hdc, 10, 85, posText, (int)strlen(posText));
     
     SelectObject(hdc, oldFont);
     DeleteObject(debugFont);
     
-    // Рисуем игроков
+    // ============================================
+    // РИСУЕМ ИГРОКОВ (только если есть смещения)
+    // ============================================
+    
+    if (!offsetsFound) return;
+    
     for (const auto& player : players) {
         if (player.position.x == localPlayer.position.x && 
             player.position.y == localPlayer.position.y &&
@@ -320,353 +548,13 @@ void UpdateOverlayPosition(HWND hOverlay) {
 }
 
 // ============================================
-// ПАРСИНГ СМЕЩЕНИЙ
+// ViewMatrix
 // ============================================
 
 ViewMatrix GetViewMatrixFromMemory(HANDLE hProcess, uintptr_t clientBase, uintptr_t viewMatrixOffset) {
     ViewMatrix vm = {};
     ReadMemory(hProcess, clientBase + viewMatrixOffset, vm);
     return vm;
-}
-
-bool RunCS2Dumper() {
-    std::string cmd = "cs2-dumper.exe --output ./output";
-    STARTUPINFOA si = { sizeof(si) };
-    PROCESS_INFORMATION pi;
-    
-    if (CreateProcessA(NULL, (LPSTR)cmd.c_str(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
-        WaitForSingleObject(pi.hProcess, INFINITE);
-        CloseHandle(pi.hProcess);
-        CloseHandle(pi.hThread);
-        return true;
-    }
-    return false;
-}
-
-uintptr_t FindOffsetInFile(const std::string& filepath, const std::string& offsetName, const std::string& namespaceName) {
-    std::ifstream file(filepath);
-    std::string line;
-    std::regex pattern(R"(constexpr std::ptrdiff_t (\w+) = (0x[0-9A-Fa-f]+);)");
-    
-    bool inNamespace = false;
-    int braceDepth = 0;
-    
-    while (std::getline(file, line)) {
-        if (line.find("namespace " + namespaceName + " {") != std::string::npos) {
-            inNamespace = true;
-            braceDepth = 1;
-            continue;
-        }
-        
-        if (inNamespace) {
-            for (char c : line) {
-                if (c == '{') braceDepth++;
-                if (c == '}') braceDepth--;
-            }
-            
-            if (braceDepth == 0) {
-                inNamespace = false;
-                continue;
-            }
-            
-            std::smatch match;
-            if (std::regex_search(line, match, pattern)) {
-                std::string name = match[1].str();
-                if (name == offsetName) {
-                    std::string value = match[2].str();
-                    return std::stoull(value, nullptr, 16);
-                }
-            }
-        }
-    }
-    
-    return 0;
-}
-
-Offsets ParseOffsets(const std::string& filepath) {
-    Offsets offsets = {};
-    std::ifstream file(filepath);
-    std::string line;
-    std::regex pattern(R"(constexpr std::ptrdiff_t (\w+) = (0x[0-9A-Fa-f]+);)");
-    
-    bool inClientDll = false;
-    
-    while (std::getline(file, line)) {
-        if (line.find("namespace client_dll {") != std::string::npos) {
-            inClientDll = true;
-            continue;
-        }
-        if (line.find("}") != std::string::npos && inClientDll) {
-            inClientDll = false;
-            continue;
-        }
-        
-        if (inClientDll) {
-            std::smatch match;
-            if (std::regex_search(line, match, pattern)) {
-                std::string name = match[1].str();
-                std::string value = match[2].str();
-                uintptr_t addr = std::stoull(value, nullptr, 16);
-                
-                if (name == "dwEntityList") offsets.dwEntityList = addr;
-                else if (name == "dwLocalPlayerPawn") offsets.dwLocalPlayerPawn = addr;
-                else if (name == "dwLocalPlayerController") offsets.dwLocalPlayerController = addr;
-                else if (name == "dwViewMatrix") offsets.dwViewMatrix = addr;
-                else if (name == "dwGameEntitySystem") offsets.dwGameEntitySystem = addr;
-                else if (name == "dwGameEntitySystem_highestEntityIndex") offsets.dwGameEntitySystem_highestEntityIndex = addr;
-            }
-        }
-    }
-    
-    return offsets;
-}
-
-Offsets GetOffsets() {
-    Offsets offsets = {};
-    
-    std::cout << "Запуск cs2-dumper для получения актуальных смещений..." << std::endl;
-    
-    CreateDirectoryA("./output", NULL);
-    
-    if (!RunCS2Dumper()) {
-        std::cout << "   [!] Не удалось запустить cs2-dumper!" << std::endl;
-        return offsets;
-    }
-    
-    offsets = ParseOffsets("./output/offsets.hpp");
-    if (offsets.dwEntityList == 0) {
-        std::cout << "   [!] Не удалось прочитать offsets.hpp!" << std::endl;
-        return offsets;
-    }
-    
-    offsets.m_iHealth = FindOffsetInFile("./output/client_dll.hpp", "m_iHealth", "C_BaseEntity");
-    offsets.m_iTeamNum = FindOffsetInFile("./output/client_dll.hpp", "m_iTeamNum", "C_BaseEntity");
-    offsets.m_lifeState = FindOffsetInFile("./output/client_dll.hpp", "m_lifeState", "C_BaseEntity");
-    offsets.m_fFlags = FindOffsetInFile("./output/client_dll.hpp", "m_fFlags", "C_BaseEntity");
-    
-    uintptr_t vecOriginInSceneNode = FindOffsetInFile("./output/client_dll.hpp", "m_vecOrigin", "CGameSceneNode");
-    uintptr_t vecOriginInBaseEntity = FindOffsetInFile("./output/client_dll.hpp", "m_vecOrigin", "C_BaseEntity");
-    
-    if (vecOriginInBaseEntity != 0) {
-        offsets.m_vecOrigin = vecOriginInBaseEntity;
-    } else if (vecOriginInSceneNode != 0) {
-        offsets.m_vecOrigin = vecOriginInSceneNode;
-    }
-    
-    std::cout << "   [✓] Смещения получены!" << std::endl;
-    std::cout << "   dwEntityList: 0x" << std::hex << offsets.dwEntityList << std::dec << std::endl;
-    std::cout << "   dwLocalPlayerPawn: 0x" << std::hex << offsets.dwLocalPlayerPawn << std::dec << std::endl;
-    std::cout << "   dwLocalPlayerController: 0x" << std::hex << offsets.dwLocalPlayerController << std::dec << std::endl;
-    std::cout << "   dwViewMatrix: 0x" << std::hex << offsets.dwViewMatrix << std::dec << std::endl;
-    std::cout << "   dwGameEntitySystem: 0x" << std::hex << offsets.dwGameEntitySystem << std::dec << std::endl;
-    std::cout << "   m_iHealth: 0x" << std::hex << offsets.m_iHealth << std::dec << std::endl;
-    std::cout << "   m_iTeamNum: 0x" << std::hex << offsets.m_iTeamNum << std::dec << std::endl;
-    std::cout << "   m_vecOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
-    
-    return offsets;
-}
-
-// ============================================
-// БАЗОВЫЕ ФУНКЦИИ
-// ============================================
-
-DWORD GetProcessIdByName(const std::wstring& processName) {
-    DWORD processId = 0;
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    
-    if (snapshot != INVALID_HANDLE_VALUE) {
-        PROCESSENTRY32W processEntry;
-        processEntry.dwSize = sizeof(processEntry);
-        
-        if (Process32FirstW(snapshot, &processEntry)) {
-            do {
-                if (_wcsicmp(processName.c_str(), processEntry.szExeFile) == 0) {
-                    processId = processEntry.th32ProcessID;
-                    break;
-                }
-            } while (Process32NextW(snapshot, &processEntry));
-        }
-        CloseHandle(snapshot);
-    }
-    return processId;
-}
-
-uintptr_t GetModuleBaseAddress(DWORD pid, const std::wstring& moduleName) {
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    
-    if (snapshot != INVALID_HANDLE_VALUE) {
-        MODULEENTRY32W moduleEntry;
-        moduleEntry.dwSize = sizeof(moduleEntry);
-        
-        if (Module32FirstW(snapshot, &moduleEntry)) {
-            do {
-                if (_wcsicmp(moduleName.c_str(), moduleEntry.szModule) == 0) {
-                    CloseHandle(snapshot);
-                    return (uintptr_t)moduleEntry.modBaseAddr;
-                }
-            } while (Module32NextW(snapshot, &moduleEntry));
-        }
-        CloseHandle(snapshot);
-    }
-    return 0;
-}
-
-template<typename T>
-bool ReadMemory(HANDLE process, uintptr_t address, T& value) {
-    SIZE_T bytesRead;
-    return ReadProcessMemory(process, (LPCVOID)address, &value, sizeof(T), &bytesRead) 
-           && bytesRead == sizeof(T);
-}
-
-bool IsValidAddress(uintptr_t address) {
-    return address > 0x10000 && address < 0x7FFFFFFF0000;
-}
-
-// ============================================
-// ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ИГРОКОВ
-// ============================================
-
-std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
-    std::vector<PlayerInfo> players;
-    
-    // 1. Читаем GameEntitySystem
-    uintptr_t entitySystem = 0;
-    if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
-        return players;
-    }
-    
-    if (!IsValidAddress(entitySystem)) {
-        return players;
-    }
-    
-    // 2. Читаем highestIndex
-    int highestIndex = 0;
-    ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);
-    
-    if (highestIndex == 0 || highestIndex > 10000) {
-        highestIndex = 512;
-    }
-    
-    static int debugCount = 0;
-    if (debugCount++ % 60 == 0) {
-        std::cout << "[DEBUG] entitySystem: 0x" << std::hex << entitySystem 
-                  << " | highestIndex: " << std::dec << highestIndex << std::endl;
-    }
-    
-    // 3. Проходим по сущностям
-    int validPlayers = 0;
-    int team2Count = 0;
-    int team3Count = 0;
-    
-    for (int i = 0; i < highestIndex; i++) {
-        uintptr_t listEntry = 0;
-        if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
-            continue;
-        }
-        
-        if (!IsValidAddress(listEntry)) {
-            continue;
-        }
-        
-        uintptr_t entity = 0;
-        if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
-            continue;
-        }
-        
-        if (!IsValidAddress(entity)) {
-            continue;
-        }
-        
-        // Читаем здоровье
-        int health = 0;
-        if (!ReadMemory(hProcess, entity + offsets.m_iHealth, health)) {
-            continue;
-        }
-        
-        if (health <= 0 || health > 100) {
-            continue;
-        }
-        
-        // ЧИТАЕМ КОМАНДУ ЧЕРЕЗ CONTROLLER
-        int team = 0;
-        
-        // Смещение m_hController в C_BasePlayerPawn = 0x13D0
-        uintptr_t controllerHandle = 0;
-        if (ReadMemory(hProcess, entity + 0x13D0, controllerHandle)) {
-            if (controllerHandle != 0) {
-                int controllerIndex = controllerHandle & 0x7FFF;
-                
-                if (controllerIndex > 0 && controllerIndex < 10000) {
-                    uintptr_t entityList = 0;
-                    if (ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
-                        if (IsValidAddress(entityList)) {
-                            uintptr_t controllerEntry = entityList + controllerIndex * 0x10;
-                            uintptr_t controller = 0;
-                            if (ReadMemory(hProcess, controllerEntry, controller)) {
-                                if (IsValidAddress(controller)) {
-                                    if (ReadMemory(hProcess, controller + offsets.m_iTeamNum, team)) {
-                                        // team = 2 или 3 для игроков
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Если не получилось через Controller, пробуем через саму сущность
-        if (team == 0) {
-            ReadMemory(hProcess, entity + offsets.m_iTeamNum, team);
-        }
-        
-        // Если команда все еще 0 - пропускаем (не игрок)
-        if (team == 0) {
-            continue;
-        }
-        
-        // Только игроки (команда 2 или 3)
-        if (team != 2 && team != 3) {
-            continue;
-        }
-        
-        if (team == 2) team2Count++;
-        if (team == 3) team3Count++;
-        
-        PlayerInfo player = {};
-        player.health = health;
-        player.team = team;
-        player.isAlive = true;
-        
-        // Читаем позицию
-        if (offsets.m_vecOrigin == 0x80) {
-            uintptr_t sceneNode = 0;
-            ReadMemory(hProcess, entity + 0x330, sceneNode);
-            if (IsValidAddress(sceneNode)) {
-                ReadMemory(hProcess, sceneNode + 0x80, player.position);
-            }
-        } else {
-            ReadMemory(hProcess, entity + offsets.m_vecOrigin, player.position);
-        }
-        
-        // Проверяем, не локальный ли это игрок
-        if (player.position.x == localPlayer.position.x && 
-            player.position.y == localPlayer.position.y &&
-            player.position.z == localPlayer.position.z) {
-            continue;
-        }
-        
-        players.push_back(player);
-        validPlayers++;
-    }
-    
-    if (debugCount % 60 == 0) {
-        std::cout << "[DEBUG] Team 2: " << team2Count 
-                  << " | Team 3: " << team3Count 
-                  << " | Valid players: " << validPlayers << std::endl;
-    }
-    
-    return players;
 }
 
 // ============================================
@@ -677,17 +565,13 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
-    std::cout << "=== CS2 ESP Overlay ===" << std::endl << std::endl;
+    std::cout << "=== CS2 ESP Overlay (Auto-Scanner) ===" << std::endl << std::endl;
     
-    // 1. Получаем смещения
-    Offsets localOffsets = GetOffsets();
-    if (localOffsets.dwEntityList == 0 || localOffsets.m_vecOrigin == 0) {
-        std::cout << "[!] Не удалось получить смещения!" << std::endl;
-        std::cout << "Нажми Enter для выхода...";
-        std::cin.get();
-        return 1;
-    }
-
+    // 1. Создаем папку secret и очищаем файлы
+    CreateDirectoryIfNotExists("secret");
+    DeleteFileIfExists("secret/ccs.trs");
+    DeleteFileIfExists("secret/poc.trs");
+    
     // 2. Находим CS2
     DWORD pid = GetProcessIdByName(L"cs2.exe");
     if (pid == 0) {
@@ -716,11 +600,15 @@ int main() {
     }
     std::cout << "3. [✓] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
 
-    // 5. Получаем размер экрана
+    // 5. Запускаем pattern_scanning.exe
+    if (!StartPatternScanner()) {
+        std::cout << "[!] Продолжаем без сканера (используем запасные смещения)" << std::endl;
+    }
+
+    // 6. Создаем оверлей
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
     int screenHeight = GetSystemMetrics(SM_CYSCREEN);
     
-    // 6. Создаем оверлей
     g_hOverlay = CreateOverlay(screenWidth, screenHeight);
     if (!g_hOverlay) {
         CloseHandle(hProcess);
@@ -730,13 +618,27 @@ int main() {
     std::cout << "4. [✓] Оверлей создан" << std::endl;
 
     std::cout << std::endl << "ESP запущен! Нажми ESC для выхода..." << std::endl;
-    std::cout << "Для теста: запусти матч с ботами!" << std::endl;
+    std::cout << "Начни игру и получай урон для поиска смещений!" << std::endl << std::endl;
 
     // 7. Основной цикл
     MSG msg = {};
     int frameCount = 0;
+    auto lastWriteTime = std::chrono::steady_clock::now();
+    
+    // Запасные смещения (если сканер не сработает)
+    Offsets fallbackOffsets = {};
+    fallbackOffsets.dwEntityList = 0x2571220;
+    fallbackOffsets.dwLocalPlayerPawn = 0x23C6268;
+    fallbackOffsets.dwLocalPlayerController = 0x23A0F30;
+    fallbackOffsets.dwViewMatrix = 0x23CB830;
+    fallbackOffsets.m_iHealth = 0x34C;
+    fallbackOffsets.m_iTeamNum = 0x3E7;
+    fallbackOffsets.m_vecOrigin = 0x80;
+    
+    g_offsets = fallbackOffsets;
     
     while (g_running) {
+        // Обработка сообщений Windows
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);
@@ -748,55 +650,117 @@ int main() {
         
         if (!g_running) break;
         
+        // Обновляем позицию оверлея
         UpdateOverlayPosition(g_hOverlay);
         
-        ViewMatrix vm = GetViewMatrixFromMemory(hProcess, clientBase, localOffsets.dwViewMatrix);
-        
-        // Читаем локального игрока
+        // Читаем локального игрока (даже без смещений, чтобы показывать статус)
         uintptr_t localPlayerPawn = 0;
-        if (!ReadMemory(hProcess, clientBase + localOffsets.dwLocalPlayerPawn, localPlayerPawn)) {
-            Sleep(16);
-            continue;
-        }
+        int localHealth = 0;
+        int localTeam = 0;
+        Vector3 localPos = {0, 0, 0};
         
-        if (!IsValidAddress(localPlayerPawn)) {
-            Sleep(16);
-            continue;
-        }
-        
-        PlayerInfo localPlayer = {};
-        ReadMemory(hProcess, localPlayerPawn + localOffsets.m_iHealth, localPlayer.health);
-        
-        if (localOffsets.m_vecOrigin == 0x80) {
-            uintptr_t sceneNode = 0;
-            ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
-            if (IsValidAddress(sceneNode)) {
-                ReadMemory(hProcess, sceneNode + 0x80, localPlayer.position);
+        if (g_offsetsFound) {
+            // Используем найденные смещения
+            ReadMemory(hProcess, clientBase + g_offsets.dwLocalPlayerPawn, localPlayerPawn);
+            if (IsValidAddress(localPlayerPawn)) {
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iTeamNum, localTeam);
+                
+                if (g_offsets.m_vecOrigin == 0x80) {
+                    uintptr_t sceneNode = 0;
+                    ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
+                    if (IsValidAddress(sceneNode)) {
+                        ReadMemory(hProcess, sceneNode + 0x80, localPos);
+                    }
+                } else {
+                    ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
+                }
             }
         } else {
-            ReadMemory(hProcess, localPlayerPawn + localOffsets.m_vecOrigin, localPlayer.position);
-        }
-        localPlayer.isAlive = (localPlayer.health > 0);
-        
-        // Читаем команду локального игрока через Controller
-        localPlayer.team = 0;
-        if (localOffsets.dwLocalPlayerController != 0) {
-            uintptr_t controller = 0;
-            if (ReadMemory(hProcess, clientBase + localOffsets.dwLocalPlayerController, controller)) {
-                if (IsValidAddress(controller)) {
-                    ReadMemory(hProcess, controller + localOffsets.m_iTeamNum, localPlayer.team);
+            // Пытаемся прочитать через запасные смещения
+            ReadMemory(hProcess, clientBase + fallbackOffsets.dwLocalPlayerPawn, localPlayerPawn);
+            if (IsValidAddress(localPlayerPawn)) {
+                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iHealth, localHealth);
+                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iTeamNum, localTeam);
+                
+                if (fallbackOffsets.m_vecOrigin == 0x80) {
+                    uintptr_t sceneNode = 0;
+                    ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
+                    if (IsValidAddress(sceneNode)) {
+                        ReadMemory(hProcess, sceneNode + 0x80, localPos);
+                    }
+                } else {
+                    ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_vecOrigin, localPos);
                 }
             }
         }
         
-        // Получаем игроков
-        auto players = GetPlayers(hProcess, clientBase, localOffsets, localPlayer);
+        PlayerInfo localPlayer = {};
+        localPlayer.health = localHealth;
+        localPlayer.team = localTeam;
+        localPlayer.position = localPos;
+        localPlayer.isAlive = (localHealth > 0 && localHealth <= 100);
         
-        if (frameCount++ % 60 == 0) {
-            std::cout << "[DEBUG] Players found: " << players.size() 
-                      << " | Local team: " << localPlayer.team << std::endl;
+        // Читаем игроков (только если есть смещения)
+        std::vector<PlayerInfo> players;
+        ViewMatrix vm = {};
+        
+        if (g_offsetsFound) {
+            vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
+            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
+        } else {
+            // Пробуем через запасные
+            vm = GetViewMatrixFromMemory(hProcess, clientBase, fallbackOffsets.dwViewMatrix);
+            players = GetPlayers(hProcess, clientBase, fallbackOffsets, localPlayer);
         }
         
+        // ============================================
+        // ЗАПИСЬ В secret/ccs.trs (каждую секунду)
+        // ============================================
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 1000) {
+            lastWriteTime = now;
+            
+            std::stringstream json;
+            json << "{\n";
+            json << "    \"timestamp\": \"" << std::chrono::system_clock::now().time_since_epoch().count() << "\",\n";
+            json << "    \"health\": " << localHealth << ",\n";
+            json << "    \"team\": " << localTeam << ",\n";
+            json << "    \"position\": {\n";
+            json << "        \"x\": " << localPos.x << ",\n";
+            json << "        \"y\": " << localPos.y << ",\n";
+            json << "        \"z\": " << localPos.z << "\n";
+            json << "    },\n";
+            json << "    \"search\": {\n";
+            json << "        \"attempts\": " << g_searchAttempts << ",\n";
+            json << "        \"status\": \"" << (g_offsetsFound ? "found" : "scanning") << "\",\n";
+            json << "        \"candidates\": " << (g_offsetsFound ? 1 : 0) << "\n";
+            json << "    }\n";
+            json << "}";
+            
+            WriteJsonToFile("secret/ccs.trs", json.str());
+            
+            g_searchAttempts++;
+        }
+        
+        // ============================================
+        // ЧТЕНИЕ ИЗ secret/poc.trs (проверка, не найдены ли смещения)
+        // ============================================
+        if (!g_offsetsFound) {
+            Offsets newOffsets = {};
+            if (ReadOffsetsFromFile(newOffsets)) {
+                if (newOffsets.m_iHealth != 0) {
+                    g_offsets = newOffsets;
+                    g_offsetsFound = true;
+                    std::cout << "[✓] Смещения получены из secret/poc.trs!" << std::endl;
+                    std::cout << "   m_iHealth: 0x" << std::hex << g_offsets.m_iHealth << std::dec << std::endl;
+                }
+            }
+        }
+        
+        // ============================================
+        // РИСУЕМ ESP
+        // ============================================
         HDC hdc = GetDC(g_hOverlay);
         
         RECT rect;
@@ -805,12 +769,20 @@ int main() {
         FillRect(hdc, &rect, clearBrush);
         DeleteObject(clearBrush);
         
-        DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight);
+        DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight, 
+                g_offsetsFound, g_searchAttempts);
         
         ReleaseDC(g_hOverlay, hdc);
         
         Sleep(16);
     }
+    
+    // ============================================
+    // ЗАКРЫТИЕ
+    // ============================================
+    
+    // Удаляем только ccs.trs, poc.trs оставляем для дебага
+    DeleteFileIfExists("secret/ccs.trs");
     
     if (g_hOverlay) {
         DestroyWindow(g_hOverlay);

@@ -10,7 +10,9 @@
                 "${file}",
                 "-o",
                 "${fileDirname}\\${fileBasenameNoExtension}.exe",
-                "-lgdi32"  // ← ДОБАВЬ ЭТУ СТРОКУ!
+                "-lgdi32",  
+                "-luser32",
+                "-lpsapi"
             ],
             "options": {
                 "cwd": "${fileDirname}"
