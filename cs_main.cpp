@@ -510,85 +510,98 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
     TextOutA(hdc, 10, 8, "ESP ACTIVE", 10);
     TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
     
+    // ============================================
+    // СТРОКА 1: ESP ACTIVE (зеленый)
+    // ============================================
+    SetTextColor(hdc, RGB(0, 255, 0));
+    TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
+    
+    // ============================================
+    // СТРОКА 2: [SCAN] Searching... (желтый) или [OK] Offsets Found! (зеленый)
+    // ============================================
     if (offsetsFound) {
-        SetTextColor(hdc, RGB(0, 255, 0));
-        TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
-        
         char foundText[64];
         sprintf(foundText, "[OK] Offsets Found! (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(0, 255, 0));
         TextOutA(hdc, 10, 35, foundText, (int)strlen(foundText));
     } else {
-        SetTextColor(hdc, RGB(255, 255, 0));
-        TextOutA(hdc, 10, 10, "ESP ACTIVE", 10);
-        
         char searchingText[64];
         sprintf(searchingText, "[SCAN] Searching for offsets... (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(255, 255, 0));
         TextOutA(hdc, 10, 35, searchingText, (int)strlen(searchingText));
-        
-        // Show scanner status
-        if (g_scannerProcess != NULL) {
-            DWORD exitCode;
-            if (GetExitCodeProcess(g_scannerProcess, &exitCode)) {
-                if (exitCode == STILL_ACTIVE) {
-                    SetTextColor(hdc, RGB(0, 255, 255));
-                    TextOutA(hdc, 10, 60, "[SCANNER] Running...", 20);
-                }
+    }
+    
+    // ============================================
+    // СТРОКА 3: [SCANNER] Running... (голубой) - только если сканер запущен
+    // ============================================
+    int yPos = 60;
+    if (!offsetsFound && g_scannerProcess != NULL) {
+        DWORD exitCode;
+        if (GetExitCodeProcess(g_scannerProcess, &exitCode)) {
+            if (exitCode == STILL_ACTIVE) {
+                SetTextColor(hdc, RGB(0, 255, 255));
+                TextOutA(hdc, 10, yPos, "[SCANNER] Running...", 20);
+                yPos += 25;
             }
         }
     }
-
-     // ============================================
-    // НОВЫЕ СТРОКИ ДЛЯ ПРОГРЕССА!
-    // ============================================
     
+    // ============================================
+    // СТРОКА 4: [SCAN] Scanning memory... (голубой) или [SCAN] Waiting... (желтый)
+    // ============================================
     if (!offsetsFound && progress.isScanning) {
-        int yOffset = 85;  // ← БАЗОВЫЙ ОТСТУП
-        
         if (progress.totalRegions > 0) {
             int percent = (progress.regionsScanned * 100) / progress.totalRegions;
             char progressText[128];
             sprintf(progressText, "[SCAN] Scanning memory... %d%% (%d/%d regions)", 
                     percent, progress.regionsScanned, progress.totalRegions);
-            SetTextColor(hdc, RGB(0, 255, 255));  // Бирюзовый
-            TextOutA(hdc, 10, yOffset, progressText, (int)strlen(progressText));
-            yOffset += 25;  // ← СЛЕДУЮЩАЯ СТРОКА НИЖЕ!
+            SetTextColor(hdc, RGB(0, 255, 255));
+            TextOutA(hdc, 10, yPos, progressText, (int)strlen(progressText));
+            yPos += 25;
         } else {
             char progressText[128];
             sprintf(progressText, "[SCAN] Waiting for scanner data...");
             SetTextColor(hdc, RGB(255, 255, 0));
-            TextOutA(hdc, 10, yOffset, progressText, (int)strlen(progressText));
-            yOffset += 25;
+            TextOutA(hdc, 10, yPos, progressText, (int)strlen(progressText));
+            yPos += 25;
         }
-        
+    } else if (!offsetsFound) {
+        // Если сканер не запущен, показываем ожидание
+        SetTextColor(hdc, RGB(255, 255, 0));
+        TextOutA(hdc, 10, yPos, "[SCAN] Waiting for scanner...", 27);
+        yPos += 25;
+    }
+    
+    // ============================================
+    // СТРОКА 5: Candidates: ... (желтый)
+    // ============================================
+    if (!offsetsFound) {
         char candidatesText[128];
         sprintf(candidatesText, "Candidates: %d | Attempts: %d", 
                 progress.candidates, progress.attempts);
-        SetTextColor(hdc, RGB(255, 255, 0));  // Желтый
-        TextOutA(hdc, 10, yOffset, candidatesText, (int)strlen(candidatesText));
-        // yOffset += 25;  // ← НЕ НУЖНО, ПОТОМУ ЧТО ДАЛЬШЕ ИДЕТ infoText
+        SetTextColor(hdc, RGB(255, 255, 0));
+        TextOutA(hdc, 10, yPos, candidatesText, (int)strlen(candidatesText));
+        yPos += 25;
     }
-
-
-    // ============================================
-    // СТАРЫЕ СТРОКИ (Players, Pos - оставляем)
-    // ============================================
     
+    // ============================================
+    // СТРОКА 6: Players: ... (голубой)
+    // ============================================
     char infoText[256];
     sprintf(infoText, "Players: %d | HP: %d | Team: %d", 
-        (int)players.size(), localPlayer.health, localPlayer.team);
-    
-    int yOffset = offsetsFound ? 60 : 110;
+            (int)players.size(), localPlayer.health, localPlayer.team);
     SetTextColor(hdc, RGB(0, 255, 255));
-    TextOutA(hdc, 10, yOffset, infoText, (int)strlen(infoText));
+    TextOutA(hdc, 10, yPos, infoText, (int)strlen(infoText));
+    yPos += 25;
     
+    // ============================================
+    // СТРОКА 7: Pos: ... (желтый)
+    // ============================================
     char posText[256];
     sprintf(posText, "Pos: (%.1f, %.1f, %.1f)", 
-        localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
-    
+            localPlayer.position.x, localPlayer.position.y, localPlayer.position.z);
     SetTextColor(hdc, RGB(255, 255, 0));
-    TextOutA(hdc, 10, yOffset + 25, posText, (int)strlen(posText));
+    TextOutA(hdc, 10, yPos, posText, (int)strlen(posText));
     
     SelectObject(hdc, oldFont);
     DeleteObject(debugFont);
