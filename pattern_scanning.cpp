@@ -15,6 +15,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <map>
+#include <psapi.h>
 
 // ============================================
 // STRUCTURES
@@ -529,7 +530,7 @@ int main() {
     std::cout << "[OK] CS2 PID: " << pid << std::endl;
     
     // Open process
-    HANDLE hProcess = OpenProcess(PROCESS_VM_READ, FALSE, pid);
+    HANDLE hProcess = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, FALSE, pid);
     if (hProcess == NULL) {
         std::cout << "[ERROR] Failed to open process! Run as Administrator." << std::endl;
         std::cin.get();
@@ -548,12 +549,20 @@ int main() {
     std::cout << "[OK] client.dll: 0x" << std::hex << clientBase << std::dec << std::endl;
     
     // Get memory regions
-    MEMORY_BASIC_INFORMATION mbi;
     size_t clientSize = 0;
-    if (VirtualQueryEx(hProcess, (LPCVOID)clientBase, &mbi, sizeof(mbi))) {
-        clientSize = mbi.RegionSize;
+    HMODULE hModule = (HMODULE)clientBase;
+    MODULEINFO moduleInfo;
+    if (GetModuleInformation(hProcess, hModule, &moduleInfo, sizeof(moduleInfo))) {
+        clientSize = moduleInfo.SizeOfImage;
+        std::cout << "[OK] client.dll size: 0x" << std::hex << clientSize << std::dec << " bytes" << std::endl;
+    } else {
+        // Fallback: пробуем VirtualQuery
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQueryEx(hProcess, (LPCVOID)clientBase, &mbi, sizeof(mbi))) {
+            clientSize = mbi.RegionSize;
+        }
+        std::cout << "[OK] client.dll size (fallback): 0x" << std::hex << clientSize << std::dec << " bytes" << std::endl;
     }
-    std::cout << "[OK] client.dll size: 0x" << std::hex << clientSize << std::dec << " bytes" << std::endl;
     
     // Get readable regions
     g_regions = GetReadableRegions(hProcess, clientBase, clientSize);
