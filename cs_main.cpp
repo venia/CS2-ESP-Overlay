@@ -191,7 +191,7 @@ bool LaunchPatternScanner() {
     // Launch scanner as separate process (hidden window)
     STARTUPINFOA si = { sizeof(si) };
     si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;  // Hide the scanner window
+    si.wShowWindow = SW_SHOW;
     
     PROCESS_INFORMATION pi = {};
     
@@ -203,7 +203,7 @@ bool LaunchPatternScanner() {
         NULL,
         NULL,
         FALSE,
-        CREATE_NO_WINDOW,  // No window
+        CREATE_NEW_CONSOLE,  
         NULL,
         NULL,
         &si,
