@@ -599,7 +599,7 @@ int main() {
         
         int currentHealth = ExtractIntFromJSON(jsonData, "health");
         
-        if (currentHealth == 0 || currentHealth > 100) {
+        if (currentHealth > 100) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             continue;
         }
