@@ -313,11 +313,24 @@ std::vector<Candidate> ScanRegionForValue(HANDLE hProcess, const MemoryRegion& r
 std::vector<Candidate> FilterCandidates(HANDLE hProcess, const std::vector<Candidate>& oldCandidates, int newValue) {
     std::vector<Candidate> result;
     
+    // Если новое значение = 0, не отбрасываем кандидатов, а проверяем их
+    // Но если кандидатов слишком много (больше 1000), фильтруем по 0
+    bool shouldFilter = (newValue != 0) || (oldCandidates.size() > 10000);
+    
     for (const auto& cand : oldCandidates) {
         if (cand.type == 0) {
             int currentValue = 0;
             if (ReadMemory(hProcess, cand.address, currentValue)) {
-                if (currentValue == newValue) {
+                // Если фильтруем, проверяем на совпадение
+                if (shouldFilter) {
+                    if (currentValue == newValue) {
+                        Candidate newCand = cand;
+                        newCand.currentValue = currentValue;
+                        newCand.previousValue = cand.currentValue;
+                        result.push_back(newCand);
+                    }
+                } else {
+                    // Не фильтруем по 0, просто сохраняем кандидата
                     Candidate newCand = cand;
                     newCand.currentValue = currentValue;
                     newCand.previousValue = cand.currentValue;
@@ -327,7 +340,14 @@ std::vector<Candidate> FilterCandidates(HANDLE hProcess, const std::vector<Candi
         } else if (cand.type == 1) {
             short currentValue = 0;
             if (ReadMemory(hProcess, cand.address, currentValue)) {
-                if (currentValue == newValue) {
+                if (shouldFilter) {
+                    if (currentValue == newValue) {
+                        Candidate newCand = cand;
+                        newCand.currentValue = currentValue;
+                        newCand.previousValue = cand.currentValue;
+                        result.push_back(newCand);
+                    }
+                } else {
                     Candidate newCand = cand;
                     newCand.currentValue = currentValue;
                     newCand.previousValue = cand.currentValue;
@@ -338,7 +358,14 @@ std::vector<Candidate> FilterCandidates(HANDLE hProcess, const std::vector<Candi
             float currentValue = 0;
             if (ReadMemory(hProcess, cand.address, currentValue)) {
                 float floatTarget = (float)newValue;
-                if (std::abs(currentValue - floatTarget) < 0.01f) {
+                if (shouldFilter) {
+                    if (std::abs(currentValue - floatTarget) < 0.01f) {
+                        Candidate newCand = cand;
+                        newCand.currentValue = (int)(currentValue + 0.5f);
+                        newCand.previousValue = cand.currentValue;
+                        result.push_back(newCand);
+                    }
+                } else {
                     Candidate newCand = cand;
                     newCand.currentValue = (int)(currentValue + 0.5f);
                     newCand.previousValue = cand.currentValue;

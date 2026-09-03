@@ -910,7 +910,7 @@ int main() {
         // WRITE TO secret/ccs.trs (every 500ms)
         // ============================================
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 500) {
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 50) {
             lastWriteTime = now;
             
             std::stringstream json;
