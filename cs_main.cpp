@@ -52,8 +52,8 @@ struct PlayerInfo {
 struct ScanProgress {
     int attempts;
     int candidates;
-    int regionsScanned;   // ← НОВОЕ!
-    int totalRegions;     // ← НОВОЕ!
+    int regionsScanned;
+    int totalRegions;
     bool isScanning;
 };
 
@@ -64,10 +64,11 @@ struct ScanProgress {
 HWND g_hOverlay = NULL;
 bool g_running = true;
 Offsets g_offsets = {};
-bool g_offsetsFound = false;
+bool g_offsetsFound = true;         // ← ВАЖНО!
 int g_searchAttempts = 0;
 HANDLE g_scannerProcess = NULL;
 ScanProgress g_scanProgress = {0, 0, 0, 0, false};
+bool g_scanningEnabled = false;  // ← Флаг для отключения сканирования
 
 // ============================================
 // SAFE FILE OPERATIONS (Atomic)
@@ -76,16 +77,13 @@ ScanProgress g_scanProgress = {0, 0, 0, 0, false};
 bool WriteFileSafe(const std::string& filename, const std::string& data) {
     std::string tempFile = filename + ".tmp";
     
-    // 1. Пишем во временный файл
     std::ofstream out(tempFile);
     if (!out.is_open()) return false;
     out << data;
     out.close();
     
-    // 2. Удаляем старый файл (если есть)
     DeleteFileA(filename.c_str());
     
-    // 3. Переименовываем временный в основной
     if (std::rename(tempFile.c_str(), filename.c_str()) != 0) {
         return false;
     }
@@ -176,19 +174,16 @@ bool IsValidAddress(uintptr_t address) {
 bool LaunchPatternScanner() {
     std::cout << "[SCANNER] Launching pattern_scanning.exe..." << std::endl;
     
-    // Get current directory
     char currentDir[MAX_PATH];
     GetCurrentDirectoryA(MAX_PATH, currentDir);
     std::string scannerPath = std::string(currentDir) + "\\pattern_scanning.exe";
     
-    // Check if scanner exists
     if (!FileExists(scannerPath)) {
         std::cout << "[ERROR] pattern_scanning.exe not found!" << std::endl;
         std::cout << "       Expected path: " << scannerPath << std::endl;
         return false;
     }
     
-    // Launch scanner as separate process (hidden window)
     STARTUPINFOA si = { sizeof(si) };
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_SHOW;
@@ -203,7 +198,7 @@ bool LaunchPatternScanner() {
         NULL,
         NULL,
         FALSE,
-        CREATE_NEW_CONSOLE,  
+        CREATE_NEW_CONSOLE,
         NULL,
         NULL,
         &si,
@@ -245,7 +240,6 @@ bool ReadOffsetsFromFile(Offsets& offsets) {
     if (jsonData.empty()) return false;
     
     try {
-        // Find status
         size_t statusPos = jsonData.find("\"status\":");
         if (statusPos != std::string::npos) {
             size_t endPos = jsonData.find(",", statusPos);
@@ -253,7 +247,6 @@ bool ReadOffsetsFromFile(Offsets& offsets) {
             if (status != "found") return false;
         }
         
-        // Find offsets
         size_t offsetsPos = jsonData.find("\"offsets\":");
         if (offsetsPos != std::string::npos) {
             auto findOffset = [&](const std::string& name) -> uintptr_t {
@@ -290,7 +283,6 @@ void UpdateScanProgress() {
     }
     
     try {
-        // Read status
         size_t statusPos = jsonData.find("\"status\":");
         if (statusPos != std::string::npos) {
             size_t startPos = jsonData.find("\"", statusPos + 9) + 1;
@@ -299,7 +291,6 @@ void UpdateScanProgress() {
             g_scanProgress.isScanning = (status == "scanning");
         }
         
-        // Read attempts
         size_t attemptsPos = jsonData.find("\"attempts\":");
         if (attemptsPos != std::string::npos) {
             attemptsPos = jsonData.find(":", attemptsPos) + 1;
@@ -309,7 +300,6 @@ void UpdateScanProgress() {
             g_searchAttempts = g_scanProgress.attempts;
         }
         
-        // Read candidates
         size_t candidatesPos = jsonData.find("\"candidates\":");
         if (candidatesPos != std::string::npos) {
             candidatesPos = jsonData.find(":", candidatesPos) + 1;
@@ -318,7 +308,6 @@ void UpdateScanProgress() {
             g_scanProgress.candidates = std::stoi(jsonData.substr(candidatesPos, endPos - candidatesPos));
         }
         
-        // Read regions_scanned
         size_t regionsScannedPos = jsonData.find("\"regions_scanned\":");
         if (regionsScannedPos != std::string::npos) {
             regionsScannedPos = jsonData.find(":", regionsScannedPos) + 1;
@@ -327,7 +316,6 @@ void UpdateScanProgress() {
             g_scanProgress.regionsScanned = std::stoi(jsonData.substr(regionsScannedPos, endPos - regionsScannedPos));
         }
         
-        // Read total_regions
         size_t totalRegionsPos = jsonData.find("\"total_regions\":");
         if (totalRegionsPos != std::string::npos) {
             totalRegionsPos = jsonData.find(":", totalRegionsPos) + 1;
@@ -386,6 +374,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
         player.team = team;
         player.isAlive = true;
         
+        // Используем m_vecAbsOrigin (0xC8)
         if (offsets.m_vecOrigin == 0x80) {
             uintptr_t sceneNode = 0;
             ReadMemory(hProcess, playerPawn + 0x330, sceneNode);
@@ -519,23 +508,25 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
     // ============================================
     // СТРОКА 2: [SCAN] Searching... (желтый) или [OK] Offsets Found! (зеленый)
     // ============================================
+    int yPos = 35;
     if (offsetsFound) {
         char foundText[64];
         sprintf(foundText, "[OK] Offsets Found! (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(0, 255, 0));
-        TextOutA(hdc, 10, 35, foundText, (int)strlen(foundText));
+        TextOutA(hdc, 10, yPos, foundText, (int)strlen(foundText));
+        yPos += 25;
     } else {
         char searchingText[64];
         sprintf(searchingText, "[SCAN] Searching for offsets... (%d attempts)", progress.attempts);
         SetTextColor(hdc, RGB(255, 255, 0));
-        TextOutA(hdc, 10, 35, searchingText, (int)strlen(searchingText));
+        TextOutA(hdc, 10, yPos, searchingText, (int)strlen(searchingText));
+        yPos += 25;
     }
     
     // ============================================
-    // СТРОКА 3: [SCANNER] Running... (голубой) - только если сканер запущен
+    // СТРОКА 3: [SCANNER] Running... (голубой) - только если сканирование включено
     // ============================================
-    int yPos = 60;
-    if (!offsetsFound && g_scannerProcess != NULL) {
+    if (!offsetsFound && g_scanningEnabled && g_scannerProcess != NULL) {
         DWORD exitCode;
         if (GetExitCodeProcess(g_scannerProcess, &exitCode)) {
             if (exitCode == STILL_ACTIVE) {
@@ -549,7 +540,7 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
     // ============================================
     // СТРОКА 4: [SCAN] Scanning memory... (голубой) или [SCAN] Waiting... (желтый)
     // ============================================
-    if (!offsetsFound && progress.isScanning) {
+    if (!offsetsFound && g_scanningEnabled && progress.isScanning) {
         if (progress.totalRegions > 0) {
             int percent = (progress.regionsScanned * 100) / progress.totalRegions;
             char progressText[128];
@@ -565,17 +556,17 @@ void DrawESP(HDC hdc, const std::vector<PlayerInfo>& players, const PlayerInfo& 
             TextOutA(hdc, 10, yPos, progressText, (int)strlen(progressText));
             yPos += 25;
         }
-    } else if (!offsetsFound) {
-        // Если сканер не запущен, показываем ожидание
-        SetTextColor(hdc, RGB(255, 255, 0));
-        TextOutA(hdc, 10, yPos, "[SCAN] Waiting for scanner...", 27);
+    } else if (!offsetsFound && !g_scanningEnabled) {
+        // Если сканирование отключено, показываем статус
+        SetTextColor(hdc, RGB(0, 255, 0));
+        TextOutA(hdc, 10, yPos, "[SCAN] Disabled (offsets loaded)", 28);
         yPos += 25;
     }
     
     // ============================================
-    // СТРОКА 5: Candidates: ... (желтый)
+    // СТРОКА 5: Candidates: ... (желтый) - только если сканирование включено
     // ============================================
-    if (!offsetsFound) {
+    if (!offsetsFound && g_scanningEnabled) {
         char candidatesText[128];
         sprintf(candidatesText, "Candidates: %d | Attempts: %d", 
                 progress.candidates, progress.attempts);
@@ -821,8 +812,7 @@ int main() {
     fallbackOffsets.dwViewMatrix = 0x23CB830;
     fallbackOffsets.m_iHealth = 0x34C;
     fallbackOffsets.m_iTeamNum = 0x3E7;
-    // fallbackOffsets.m_vecOrigin = 0x80;
-    fallbackOffsets.m_vecOrigin = 0xC8;
+    fallbackOffsets.m_vecOrigin = 0xC8;  // m_vecAbsOrigin!
     
     g_offsets = fallbackOffsets;
     
@@ -861,15 +851,8 @@ int main() {
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iTeamNum, localTeam);
                 
-                if (g_offsets.m_vecOrigin == 0x80) {
-                    uintptr_t sceneNode = 0;
-                    ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
-                    if (IsValidAddress(sceneNode)) {
-                        ReadMemory(hProcess, sceneNode + 0x80, localPos);
-                    }
-                } else {
-                    ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
-                }
+                // Используем m_vecAbsOrigin (0xC8)
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
             }
         } else {
             ReadMemory(hProcess, clientBase + fallbackOffsets.dwLocalPlayerPawn, localPlayerPawn);
@@ -877,15 +860,8 @@ int main() {
                 ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iHealth, localHealth);
                 ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iTeamNum, localTeam);
                 
-                if (fallbackOffsets.m_vecOrigin == 0x80) {
-                    uintptr_t sceneNode = 0;
-                    ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
-                    if (IsValidAddress(sceneNode)) {
-                        ReadMemory(hProcess, sceneNode + 0x80, localPos);
-                    }
-                } else {
-                    ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_vecOrigin, localPos);
-                }
+                // Используем m_vecAbsOrigin (0xC8)
+                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_vecOrigin, localPos);
             }
         }
         
@@ -908,31 +884,33 @@ int main() {
         }
         
         // ============================================
-        // WRITE TO secret/ccs.trs (every 500ms)
+        // WRITE TO secret/ccs.trs (only if scanning enabled)
         // ============================================
-        auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 50) {
-            lastWriteTime = now;
-            
-            std::stringstream json;
-            json << "{\n";
-            json << "    \"timestamp\": \"" << std::chrono::system_clock::now().time_since_epoch().count() << "\",\n";
-            json << "    \"health\": " << localHealth << ",\n";
-            json << "    \"team\": " << localTeam << ",\n";
-            json << "    \"position\": {\n";
-            json << "        \"x\": " << localPos.x << ",\n";
-            json << "        \"y\": " << localPos.y << ",\n";
-            json << "        \"z\": " << localPos.z << "\n";
-            json << "    },\n";
-            json << "    \"search\": {\n";
-            json << "        \"attempts\": " << g_searchAttempts << ",\n";
-            json << "        \"status\": \"" << (g_offsetsFound ? "found" : "scanning") << "\",\n";
-            json << "        \"candidates\": " << (g_offsetsFound ? 1 : 0) << "\n";
-            json << "    }\n";
-            json << "}";
-            
-            WriteFileSafe("secret/ccs.trs", json.str());
-            g_searchAttempts++;
+        if (g_scanningEnabled) {
+            auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastWriteTime).count() >= 50) {
+                lastWriteTime = now;
+                
+                std::stringstream json;
+                json << "{\n";
+                json << "    \"timestamp\": \"" << std::chrono::system_clock::now().time_since_epoch().count() << "\",\n";
+                json << "    \"health\": " << localHealth << ",\n";
+                json << "    \"team\": " << localTeam << ",\n";
+                json << "    \"position\": {\n";
+                json << "        \"x\": " << localPos.x << ",\n";
+                json << "        \"y\": " << localPos.y << ",\n";
+                json << "        \"z\": " << localPos.z << "\n";
+                json << "    },\n";
+                json << "    \"search\": {\n";
+                json << "        \"attempts\": " << g_searchAttempts << ",\n";
+                json << "        \"status\": \"" << (g_offsetsFound ? "found" : "scanning") << "\",\n";
+                json << "        \"candidates\": " << (g_offsetsFound ? 1 : 0) << "\n";
+                json << "    }\n";
+                json << "}";
+                
+                WriteFileSafe("secret/ccs.trs", json.str());
+                g_searchAttempts++;
+            }
         }
         
         // ============================================
@@ -944,6 +922,7 @@ int main() {
                 if (newOffsets.m_iHealth != 0) {
                     g_offsets = newOffsets;
                     g_offsetsFound = true;
+                    g_scanningEnabled = false;  // ← ОТКЛЮЧАЕМ СКАНИРОВАНИЕ!
                     std::cout << std::endl;
                     std::cout << "╔══════════════════════════════════════════════════════════════╗" << std::endl;
                     std::cout << "║                    OFFSETS FOUND!                         ║" << std::endl;
@@ -951,7 +930,9 @@ int main() {
                     std::cout << "  m_iHealth      : 0x" << std::hex << g_offsets.m_iHealth << std::dec << std::endl;
                     std::cout << "  dwEntityList   : 0x" << std::hex << g_offsets.dwEntityList << std::dec << std::endl;
                     std::cout << "  dwViewMatrix   : 0x" << std::hex << g_offsets.dwViewMatrix << std::dec << std::endl;
+                    std::cout << "  m_vecOrigin    : 0x" << std::hex << g_offsets.m_vecOrigin << std::dec << std::endl;
                     std::cout << "  ESP is now fully functional!" << std::endl;
+                    std::cout << "  Scanning disabled." << std::endl;
                     std::cout << std::endl;
                 }
             }
@@ -969,7 +950,7 @@ int main() {
         DeleteObject(clearBrush);
         
         DrawESP(hdc, players, localPlayer, vm, screenWidth, screenHeight, 
-        g_offsetsFound, g_scanProgress); 
+                g_offsetsFound, g_scanProgress);
         
         ReleaseDC(g_hOverlay, hdc);
         
@@ -980,7 +961,6 @@ int main() {
     // CLEANUP
     // ============================================
     
-    // Delete only ccs.trs, keep poc.trs for debugging
     DeleteFileIfExists("secret/ccs.trs");
     
     // Wait for scanner to finish if still running
