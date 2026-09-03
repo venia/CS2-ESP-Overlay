@@ -258,3 +258,42 @@ WorldToScreen — преобразование 3D координат в 2D эк�
 Отрисовка поверх игры — через Overlay (DirectX, OpenGL) или через GDI
 
 Хочешь попробовать добавить ESP?
+=======================================================================================================================================================
+Что мы ищем?
+Главный параметр, ради которого все затеяно — m_vecOrigin (позиция игрока в 3D мире).
+
+Этот параметр нужен для ESP (Wallhack), чтобы рисовать рамки вокруг врагов на экране.
+
+📂 Что было с cs2-dumper
+Ты сгенерировал папку output с помощью cs2-dumper. В ней были файлы:
+
+text
+output/
+├── offsets.hpp          ← Основные смещения (dwEntityList, dwLocalPlayerPawn...)
+├── client_dll.hpp       ← ВСЕ классы и их смещения (567 классов!)
+├── client_dll.json
+└── ...
+Проблема: В client_dll.hpp не было m_vecOrigin в классе C_BaseEntity. А в offsets.hpp не было dwGameEntitySystem (или оно было = dwEntityList).
+
+
+Что мы хотели получить:
+Смещение	               Назначение
+dwEntityList	         Список всех сущностей (игроков, объектов)
+dwLocalPlayerPawn	      Указатель на локального игрока
+dwViewMatrix	         Матрица для 3D → 2D преобразования
+m_iHealth	            Здоровье игрока
+m_iTeamNum	            Команда (2 = Terrorist, 3 = CT)
+m_vecOrigin	            ПОЗИЦИЯ ИГРОКА (то, что ищем!)
+dwGameEntitySystem	   Новая система сущностей (вместо старого dwEntityList)
+
+Твой cs_main.cpp сейчас использует:
+cpp
+struct Offsets {
+    uintptr_t dwEntityList;
+    uintptr_t dwLocalPlayerPawn;
+    uintptr_t dwLocalPlayerController;
+    uintptr_t dwViewMatrix;
+    uintptr_t m_iHealth;
+    uintptr_t m_iTeamNum;
+    uintptr_t m_vecOrigin;    // ← ЭТОТ ПАРАМЕТР МЫ ИЩЕМ!
+};

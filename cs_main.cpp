@@ -821,7 +821,8 @@ int main() {
     fallbackOffsets.dwViewMatrix = 0x23CB830;
     fallbackOffsets.m_iHealth = 0x34C;
     fallbackOffsets.m_iTeamNum = 0x3E7;
-    fallbackOffsets.m_vecOrigin = 0x80;
+    // fallbackOffsets.m_vecOrigin = 0x80;
+    fallbackOffsets.m_vecOrigin = 0xC8;
     
     g_offsets = fallbackOffsets;
     
