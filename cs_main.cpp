@@ -530,7 +530,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
             uintptr_t sceneNode = 0;
             ReadMemory(hProcess, playerPawn + 0x330, sceneNode);
             if (IsValidAddress(sceneNode)) {
-                ReadMemory(hProcess, sceneNode + 0x80, player.position);
+                ReadMemory(hProcess, sceneNode + offsets.m_vecOrigin, player.position);
             }
         } else {
             ReadMemory(hProcess, playerPawn + offsets.m_vecOrigin, player.position);
@@ -980,17 +980,6 @@ int main() {
     std::cout << "  m_vecOrigin        : 0x" << std::hex << g_offsets.m_vecOrigin << std::dec << std::endl;
     std::cout << std::endl;
     
-    // Offsets fallbackOffsets = {};
-    // fallbackOffsets.dwEntityList = 0x2571220;
-    // fallbackOffsets.dwLocalPlayerPawn = 0x23C6268;
-    // fallbackOffsets.dwLocalPlayerController = 0x23A0F30;
-    // fallbackOffsets.dwViewMatrix = 0x23CB830;
-    // fallbackOffsets.m_iHealth = 0x34C;
-    // fallbackOffsets.m_iTeamNum = 0x3E7;
-    // fallbackOffsets.m_vecOrigin = 0xC8;  // m_vecAbsOrigin!
-    
-    // g_offsets = fallbackOffsets;
-    
     // 8. Main loop
     MSG msg = {};
     auto lastWriteTime = std::chrono::steady_clock::now();
@@ -1026,8 +1015,15 @@ int main() {
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iTeamNum, localTeam);
                 
-                // Используем m_vecAbsOrigin (0xC8)
-                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
+                // ============================================
+                // ЧИТАЕМ ПОЗИЦИЮ ЧЕРЕЗ CGameSceneNode
+                // ============================================
+                uintptr_t sceneNode = 0;
+                ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);  // m_pGameSceneNode
+                
+                if (IsValidAddress(sceneNode)) {
+                    ReadMemory(hProcess, sceneNode + g_offsets.m_vecOrigin, localPos);  // 0x80 из CGameSceneNode
+                }
             }
         } else {
             ReadMemory(hProcess, clientBase + g_offsets.dwLocalPlayerPawn, localPlayerPawn);
@@ -1035,8 +1031,15 @@ int main() {
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iTeamNum, localTeam);
                 
-                // Используем m_vecAbsOrigin (0xC8)
-                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
+                // ============================================
+                // ЧИТАЕМ ПОЗИЦИЮ ЧЕРЕЗ CGameSceneNode
+                // ============================================
+                uintptr_t sceneNode = 0;
+                ReadMemory(hProcess, localPlayerPawn + 0x330, sceneNode);
+                
+                if (IsValidAddress(sceneNode)) {
+                    ReadMemory(hProcess, sceneNode + g_offsets.m_vecOrigin, localPos);
+                }
             }
         }
         
