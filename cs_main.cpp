@@ -29,6 +29,8 @@ struct Offsets {
     uintptr_t m_iHealth;
     uintptr_t m_iTeamNum;
     uintptr_t m_vecOrigin;
+    uintptr_t dwGameEntitySystem;          // ← ДОБАВИТЬ!
+    uintptr_t dwGameEntitySystem_highestEntityIndex;  // ← ДОБАВИТЬ!
 };
 
 struct Vector3 {
@@ -211,6 +213,14 @@ bool LoadOffsetsFromDumper(Offsets& offsets) {
                 offsets.dwViewMatrix = clientDll["dwViewMatrix"];
                 std::cout << "[OFFSETS] dwViewMatrix: 0x" << std::hex << offsets.dwViewMatrix << std::dec << std::endl;
             }
+            if (clientDll.contains("dwGameEntitySystem")) {
+                offsets.dwGameEntitySystem = clientDll["dwGameEntitySystem"];
+                std::cout << "[OFFSETS] dwGameEntitySystem: 0x" << std::hex << offsets.dwGameEntitySystem << std::dec << std::endl;
+            }
+            if (clientDll.contains("dwGameEntitySystem_highestEntityIndex")) {
+                offsets.dwGameEntitySystem_highestEntityIndex = clientDll["dwGameEntitySystem_highestEntityIndex"];
+                std::cout << "[OFFSETS] dwGameEntitySystem_highestEntityIndex: 0x" << std::hex << offsets.dwGameEntitySystem_highestEntityIndex << std::dec << std::endl;
+            }
         }
         
         // C_BaseEntity смещения из client_dll.json
@@ -238,6 +248,15 @@ bool LoadOffsetsFromDumper(Offsets& offsets) {
                     else if (fields.contains("m_vecOrigin")) {
                         offsets.m_vecOrigin = fields["m_vecOrigin"];
                         std::cout << "[OFFSETS] m_vecOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
+                    }
+                    // После загрузки всех смещений:
+                    if (offsets.dwGameEntitySystem == 0) {
+                        offsets.dwGameEntitySystem = offsets.dwEntityList;
+                        std::cout << "[OFFSETS] dwGameEntitySystem fallback: 0x" << std::hex << offsets.dwGameEntitySystem << std::dec << std::endl;
+                    }
+                    if (offsets.dwGameEntitySystem_highestEntityIndex == 0) {
+                        offsets.dwGameEntitySystem_highestEntityIndex = 0x2090;
+                        std::cout << "[OFFSETS] dwGameEntitySystem_highestEntityIndex fallback: 0x" << std::hex << offsets.dwGameEntitySystem_highestEntityIndex << std::dec << std::endl;
                     }
                 }
             }
@@ -484,28 +503,52 @@ void UpdateScanProgress() {
 // GET PLAYERS
 // ============================================
 
-std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, PlayerInfo& localPlayer) {
+std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, 
+                                   uintptr_t localPlayerPawn) {  // ← НОВЫЙ ПАРАМЕТР!
     std::vector<PlayerInfo> players;
     
-    uintptr_t entityList = 0;
-    if (!ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList)) {
+    uintptr_t entitySystem = 0;
+    if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
         return players;
     }
     
-    if (!IsValidAddress(entityList)) {
+    if (!IsValidAddress(entitySystem)) {
         return players;
     }
     
-    for (int i = 0; i < 64; i++) {
-        uintptr_t playerPawn = 0;
-        uintptr_t entityEntry = entityList + (i + 1) * 0x10;
+    int highestIndex = 0;
+    if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
+        ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
+    } else {
+        ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);  // fallback
+    }
+    
+    for (int i = 0; i < highestIndex && i < 10000; i++) {
+        uintptr_t listEntry = 0;
+        if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
+            continue;
+        }
         
-        if (!ReadMemory(hProcess, entityEntry, playerPawn) || !IsValidAddress(playerPawn)) {
+        if (!IsValidAddress(listEntry)) {
+            continue;
+        }
+        
+        uintptr_t entity = 0;
+        if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
+            continue;
+        }
+        
+        if (!IsValidAddress(entity)) {
+            continue;
+        }
+        
+        // Пропускаем локального игрока
+        if (entity == localPlayerPawn) {
             continue;
         }
         
         int health = 0;
-        if (!ReadMemory(hProcess, playerPawn + offsets.m_iHealth, health)) {
+        if (!ReadMemory(hProcess, entity + offsets.m_iHealth, health)) {
             continue;
         }
         
@@ -514,7 +557,9 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
         }
         
         int team = 0;
-        ReadMemory(hProcess, playerPawn + offsets.m_iTeamNum, team);
+        if (!ReadMemory(hProcess, entity + offsets.m_iTeamNum, team)) {
+            continue;
+        }
         
         if (team != 2 && team != 3) {
             continue;
@@ -525,15 +570,10 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
         player.team = team;
         player.isAlive = true;
         
-        // Используем m_vecAbsOrigin (0xC8)
-        if (offsets.m_vecOrigin == 0x80) {
-            uintptr_t sceneNode = 0;
-            ReadMemory(hProcess, playerPawn + 0x330, sceneNode);
-            if (IsValidAddress(sceneNode)) {
-                ReadMemory(hProcess, sceneNode + offsets.m_vecOrigin, player.position);
-            }
-        } else {
-            ReadMemory(hProcess, playerPawn + offsets.m_vecOrigin, player.position);
+        uintptr_t sceneNode = 0;
+        ReadMemory(hProcess, entity + 0x330, sceneNode);
+        if (IsValidAddress(sceneNode)) {
+            ReadMemory(hProcess, sceneNode + offsets.m_vecOrigin, player.position);
         }
         
         players.push_back(player);
@@ -1055,10 +1095,10 @@ int main() {
         
         if (g_offsetsFound) {
             vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
-            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
+            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayerPawn);  // ← ПЕРЕДАЕМ localPlayerPawn!
         } else {
             vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
-            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
+            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayerPawn);
         }
         
         // ============================================
