@@ -500,83 +500,152 @@ void UpdateScanProgress() {
 }
 
 // ============================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПРОВЕРКИ ИГРОКОВ
+// ============================================
+
+bool IsPlayerEntity(HANDLE hProcess, uintptr_t entity, const Offsets& offsets) {
+    // Проверяем здоровье
+    int health = 0;
+    if (!ReadMemory(hProcess, entity + offsets.m_iHealth, health)) {
+        return false;
+    }
+    
+    // Здоровье должно быть 0-100
+    if (health < 0 || health > 100) {
+        return false;
+    }
+    
+    // Проверяем команду
+    int team = 0;
+    if (!ReadMemory(hProcess, entity + offsets.m_iTeamNum, team)) {
+        return false;
+    }
+    
+    // Команда 2 = Terrorist, 3 = CT
+    if (team != 2 && team != 3) {
+        return false;
+    }
+    
+    // Проверяем состояние жизни (m_lifeState = 0x354)
+    int lifeState = 0;
+    ReadMemory(hProcess, entity + 0x354, lifeState);
+    
+    // lifeState == 0 значит жив
+    if (lifeState != 0) {
+        return false;
+    }
+    
+    return true;
+}
+
+PlayerInfo ReadPlayerInfo(HANDLE hProcess, uintptr_t entity, const Offsets& offsets) {
+    PlayerInfo player = {};
+    
+    ReadMemory(hProcess, entity + offsets.m_iHealth, player.health);
+    ReadMemory(hProcess, entity + offsets.m_iTeamNum, player.team);
+    player.isAlive = true;
+    
+    // Читаем позицию через CGameSceneNode
+    uintptr_t sceneNode = 0;
+    ReadMemory(hProcess, entity + 0x330, sceneNode);
+    if (IsValidAddress(sceneNode)) {
+        ReadMemory(hProcess, sceneNode + offsets.m_vecOrigin, player.position);
+    }
+    
+    return player;
+}
+
+// ============================================
 // GET PLAYERS
 // ============================================
 
 std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, 
-                                   uintptr_t localPlayerPawn) {  // ← НОВЫЙ ПАРАМЕТР!
+                                   uintptr_t localPlayerPawn) {
     std::vector<PlayerInfo> players;
     
+    // ============================================
+    // СПОСОБ 1: ЧЕРЕЗ dwGameEntitySystem (НОВЫЙ)
+    // ============================================
     uintptr_t entitySystem = 0;
-    if (!ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem)) {
-        return players;
+    if (ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem) && IsValidAddress(entitySystem)) {
+        
+        int highestIndex = 0;
+        if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
+            ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
+        } else {
+            ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);
+        }
+        
+        for (int i = 0; i < highestIndex && i < 10000; i++) {
+            uintptr_t listEntry = 0;
+            if (!ReadMemory(hProcess, entitySystem + 0x10 + i * 0x8, listEntry)) {
+                continue;
+            }
+            
+            if (!IsValidAddress(listEntry)) {
+                continue;
+            }
+            
+            uintptr_t entity = 0;
+            if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
+                continue;
+            }
+            
+            if (!IsValidAddress(entity)) {
+                continue;
+            }
+            
+            // Пропускаем локального игрока
+            if (entity == localPlayerPawn) {
+                continue;
+            }
+            
+            // Проверяем, является ли сущность игроком
+            if (IsPlayerEntity(hProcess, entity, offsets)) {
+                PlayerInfo player = ReadPlayerInfo(hProcess, entity, offsets);
+                if (player.isAlive) {
+                    players.push_back(player);
+                }
+            }
+        }
     }
     
-    if (!IsValidAddress(entitySystem)) {
-        return players;
+    // ============================================
+    // СПОСОБ 2: ЧЕРЕЗ dwEntityList (СТАРЫЙ)
+    // ============================================
+    uintptr_t entityList = 0;
+    if (ReadMemory(hProcess, clientBase + offsets.dwEntityList, entityList) && IsValidAddress(entityList)) {
+        
+        for (int i = 0; i < 64; i++) {
+            uintptr_t entity = 0;
+            uintptr_t entityEntry = entityList + (i + 1) * 0x10;
+            
+            if (!ReadMemory(hProcess, entityEntry, entity)) {
+                continue;
+            }
+            
+            if (!IsValidAddress(entity)) {
+                continue;
+            }
+            
+            // Пропускаем локального игрока
+            if (entity == localPlayerPawn) {
+                continue;
+            }
+            
+            // Проверяем, является ли сущность игроком
+            if (IsPlayerEntity(hProcess, entity, offsets)) {
+                PlayerInfo player = ReadPlayerInfo(hProcess, entity, offsets);
+                if (player.isAlive) {
+                    players.push_back(player);
+                }
+            }
+        }
     }
     
-    int highestIndex = 0;
-    if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
-        ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
-    } else {
-        ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);  // fallback
-    }
-    
-    for (int i = 0; i < highestIndex && i < 10000; i++) {
-        uintptr_t listEntry = 0;
-        if (!ReadMemory(hProcess, entitySystem + 0x18 + i * 0x8, listEntry)) {
-            continue;
-        }
-        
-        if (!IsValidAddress(listEntry)) {
-            continue;
-        }
-        
-        uintptr_t entity = 0;
-        if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
-            continue;
-        }
-        
-        if (!IsValidAddress(entity)) {
-            continue;
-        }
-        
-        // Пропускаем локального игрока
-        if (entity == localPlayerPawn) {
-            continue;
-        }
-        
-        int health = 0;
-        if (!ReadMemory(hProcess, entity + offsets.m_iHealth, health)) {
-            continue;
-        }
-        
-        if (health <= 0 || health > 100) {
-            continue;
-        }
-        
-        int team = 0;
-        if (!ReadMemory(hProcess, entity + offsets.m_iTeamNum, team)) {
-            continue;
-        }
-        
-        if (team != 2 && team != 3) {
-            continue;
-        }
-        
-        PlayerInfo player = {};
-        player.health = health;
-        player.team = team;
-        player.isAlive = true;
-        
-        uintptr_t sceneNode = 0;
-        ReadMemory(hProcess, entity + 0x330, sceneNode);
-        if (IsValidAddress(sceneNode)) {
-            ReadMemory(hProcess, sceneNode + offsets.m_vecOrigin, player.position);
-        }
-        
-        players.push_back(player);
+    static int debugCount = 0;
+    if (debugCount++ % 60 == 0) {
+        std::cout << "[DEBUG] Total players found: " << players.size() << std::endl;
     }
     
     return players;
