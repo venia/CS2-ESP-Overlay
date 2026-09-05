@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <nlohmann/json.hpp>
 
 // ============================================
 // STRUCTURES
@@ -69,6 +70,7 @@ int g_searchAttempts = 0;
 HANDLE g_scannerProcess = NULL;
 ScanProgress g_scanProgress = {0, 0, 0, 0, false};
 bool g_scanningEnabled = false;  // ← Флаг для отключения сканирования
+using json = nlohmann::json;
 
 // ============================================
 // SAFE FILE OPERATIONS (Atomic)
@@ -114,6 +116,155 @@ bool FileExists(const std::string& filename) {
 // ============================================
 // BASE FUNCTIONS
 // ============================================
+
+// Читает смещения из файлов, сгенерированных cs2-dumper
+bool LoadOffsetsFromDumper(Offsets& offsets) {
+    bool success = false;
+    
+    // ============================================
+    // ШАГ 1: ЗАПУСКАЕМ cs2-dumper.exe
+    // ============================================
+    std::cout << "[DUMPER] Running cs2-dumper.exe to get fresh offsets..." << std::endl;
+    
+    // Проверяем, существует ли cs2-dumper.exe
+    if (!FileExists("cs2-dumper.exe")) {
+        std::cout << "[ERROR] cs2-dumper.exe not found!" << std::endl;
+        std::cout << "[ERROR] Please place cs2-dumper.exe in the same folder." << std::endl;
+        return false;
+    }
+    
+    // Запускаем cs2-dumper.exe и ждем завершения
+    STARTUPINFOA si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;  // Скрываем окно
+    
+    PROCESS_INFORMATION pi = {};
+    
+    std::string cmd = "cs2-dumper.exe";
+    
+    if (!CreateProcessA(
+        NULL,
+        (LPSTR)cmd.c_str(),
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NO_WINDOW,  // Без окна
+        NULL,
+        NULL,
+        &si,
+        &pi)) {
+        std::cout << "[ERROR] Failed to run cs2-dumper.exe: " << GetLastError() << std::endl;
+        return false;
+    }
+    
+    // Ждем завершения
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    
+    std::cout << "[DUMPER] cs2-dumper.exe finished." << std::endl;
+    
+    // ============================================
+    // ШАГ 2: ЧИТАЕМ СВЕЖИЕ ФАЙЛЫ
+    // ============================================
+    
+    std::cout << "[OFFSETS] Loading fresh offsets from output/..." << std::endl;
+    
+    // 1. Читаем offsets.json
+    std::ifstream offsetsFile("output/offsets.json");
+    if (!offsetsFile.is_open()) {
+        std::cout << "[ERROR] output/offsets.json not found!" << std::endl;
+        return false;
+    }
+    
+    json offsetsData;
+    offsetsFile >> offsetsData;
+    
+    // 2. Читаем client_dll.json
+    std::ifstream clientFile("output/client_dll.json");
+    if (!clientFile.is_open()) {
+        std::cout << "[ERROR] output/client_dll.json not found!" << std::endl;
+        return false;
+    }
+    
+    json clientData;
+    clientFile >> clientData;
+    
+    try {
+        // client.dll смещения из offsets.json
+        if (offsetsData.contains("client.dll")) {
+            auto& clientDll = offsetsData["client.dll"];
+            
+            if (clientDll.contains("dwEntityList")) {
+                offsets.dwEntityList = clientDll["dwEntityList"];
+                std::cout << "[OFFSETS] dwEntityList: 0x" << std::hex << offsets.dwEntityList << std::dec << std::endl;
+            }
+            if (clientDll.contains("dwLocalPlayerPawn")) {
+                offsets.dwLocalPlayerPawn = clientDll["dwLocalPlayerPawn"];
+                std::cout << "[OFFSETS] dwLocalPlayerPawn: 0x" << std::hex << offsets.dwLocalPlayerPawn << std::dec << std::endl;
+            }
+            if (clientDll.contains("dwLocalPlayerController")) {
+                offsets.dwLocalPlayerController = clientDll["dwLocalPlayerController"];
+                std::cout << "[OFFSETS] dwLocalPlayerController: 0x" << std::hex << offsets.dwLocalPlayerController << std::dec << std::endl;
+            }
+            if (clientDll.contains("dwViewMatrix")) {
+                offsets.dwViewMatrix = clientDll["dwViewMatrix"];
+                std::cout << "[OFFSETS] dwViewMatrix: 0x" << std::hex << offsets.dwViewMatrix << std::dec << std::endl;
+            }
+        }
+        
+        // C_BaseEntity смещения из client_dll.json
+        if (clientData.contains("client.dll") && clientData["client.dll"].contains("classes")) {
+            auto& classes = clientData["client.dll"]["classes"];
+            
+            if (classes.contains("C_BaseEntity")) {
+                auto& baseEntity = classes["C_BaseEntity"];
+                
+                if (baseEntity.contains("fields")) {
+                    auto& fields = baseEntity["fields"];
+                    
+                    if (fields.contains("m_iHealth")) {
+                        offsets.m_iHealth = fields["m_iHealth"];
+                        std::cout << "[OFFSETS] m_iHealth: 0x" << std::hex << offsets.m_iHealth << std::dec << std::endl;
+                    }
+                    if (fields.contains("m_iTeamNum")) {
+                        offsets.m_iTeamNum = fields["m_iTeamNum"];
+                        std::cout << "[OFFSETS] m_iTeamNum: 0x" << std::hex << offsets.m_iTeamNum << std::dec << std::endl;
+                    }
+                    if (fields.contains("m_vecAbsOrigin")) {
+                        offsets.m_vecOrigin = fields["m_vecAbsOrigin"];
+                        std::cout << "[OFFSETS] m_vecAbsOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
+                    }
+                    else if (fields.contains("m_vecOrigin")) {
+                        offsets.m_vecOrigin = fields["m_vecOrigin"];
+                        std::cout << "[OFFSETS] m_vecOrigin: 0x" << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
+                    }
+                }
+            }
+            
+            // Если m_vecOrigin не нашли в C_BaseEntity, пробуем CGameSceneNode
+            if (offsets.m_vecOrigin == 0 && classes.contains("CGameSceneNode")) {
+                auto& sceneNode = classes["CGameSceneNode"];
+                if (sceneNode.contains("fields")) {
+                    auto& fields = sceneNode["fields"];
+                    if (fields.contains("m_vecOrigin")) {
+                        offsets.m_vecOrigin = fields["m_vecOrigin"];
+                        std::cout << "[OFFSETS] m_vecOrigin (from CGameSceneNode): 0x" 
+                                  << std::hex << offsets.m_vecOrigin << std::dec << std::endl;
+                    }
+                }
+            }
+        }
+        
+        success = true;
+        
+    } catch (const std::exception& e) {
+        std::cout << "[ERROR] Failed to parse JSON: " << e.what() << std::endl;
+        return false;
+    }
+    
+    return success;
+}
 
 DWORD GetProcessIdByName(const std::wstring& processName) {
     DWORD processId = 0;
@@ -804,17 +955,41 @@ int main() {
     std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
     std::cout << std::endl;
 
-    // 7. Fallback offsets
-    Offsets fallbackOffsets = {};
-    fallbackOffsets.dwEntityList = 0x2571220;
-    fallbackOffsets.dwLocalPlayerPawn = 0x23C6268;
-    fallbackOffsets.dwLocalPlayerController = 0x23A0F30;
-    fallbackOffsets.dwViewMatrix = 0x23CB830;
-    fallbackOffsets.m_iHealth = 0x34C;
-    fallbackOffsets.m_iTeamNum = 0x3E7;
-    fallbackOffsets.m_vecOrigin = 0xC8;  // m_vecAbsOrigin!
+    // 7. Загружаем смещения из cs2-dumper
+    std::cout << "[OFFSETS] Loading offsets from cs2-dumper output..." << std::endl;
+
+    if (!LoadOffsetsFromDumper(g_offsets)) {
+        std::cout << "[WARNING] Failed to load offsets from dumper. Using hardcoded fallback." << std::endl;
+        
+        // FALLBACK (только если не загрузилось)
+        g_offsets.dwEntityList = 0x2571220;
+        g_offsets.dwLocalPlayerPawn = 0x23C6268;
+        g_offsets.dwLocalPlayerController = 0x23A0F30;
+        g_offsets.dwViewMatrix = 0x23CB830;
+        g_offsets.m_iHealth = 0x34C;
+        g_offsets.m_iTeamNum = 0x3E7;
+        g_offsets.m_vecOrigin = 0xC8;
+    }
+    std::cout << "[OFFSETS] Final offsets:" << std::endl;
+    std::cout << "  dwEntityList       : 0x" << std::hex << g_offsets.dwEntityList << std::dec << std::endl;
+    std::cout << "  dwLocalPlayerPawn  : 0x" << std::hex << g_offsets.dwLocalPlayerPawn << std::dec << std::endl;
+    std::cout << "  dwLocalPlayerController: 0x" << std::hex << g_offsets.dwLocalPlayerController << std::dec << std::endl;
+    std::cout << "  dwViewMatrix       : 0x" << std::hex << g_offsets.dwViewMatrix << std::dec << std::endl;
+    std::cout << "  m_iHealth          : 0x" << std::hex << g_offsets.m_iHealth << std::dec << std::endl;
+    std::cout << "  m_iTeamNum         : 0x" << std::hex << g_offsets.m_iTeamNum << std::dec << std::endl;
+    std::cout << "  m_vecOrigin        : 0x" << std::hex << g_offsets.m_vecOrigin << std::dec << std::endl;
+    std::cout << std::endl;
     
-    g_offsets = fallbackOffsets;
+    // Offsets fallbackOffsets = {};
+    // fallbackOffsets.dwEntityList = 0x2571220;
+    // fallbackOffsets.dwLocalPlayerPawn = 0x23C6268;
+    // fallbackOffsets.dwLocalPlayerController = 0x23A0F30;
+    // fallbackOffsets.dwViewMatrix = 0x23CB830;
+    // fallbackOffsets.m_iHealth = 0x34C;
+    // fallbackOffsets.m_iTeamNum = 0x3E7;
+    // fallbackOffsets.m_vecOrigin = 0xC8;  // m_vecAbsOrigin!
+    
+    // g_offsets = fallbackOffsets;
     
     // 8. Main loop
     MSG msg = {};
@@ -855,13 +1030,13 @@ int main() {
                 ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
             }
         } else {
-            ReadMemory(hProcess, clientBase + fallbackOffsets.dwLocalPlayerPawn, localPlayerPawn);
+            ReadMemory(hProcess, clientBase + g_offsets.dwLocalPlayerPawn, localPlayerPawn);
             if (IsValidAddress(localPlayerPawn)) {
-                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iHealth, localHealth);
-                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_iTeamNum, localTeam);
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iHealth, localHealth);
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_iTeamNum, localTeam);
                 
                 // Используем m_vecAbsOrigin (0xC8)
-                ReadMemory(hProcess, localPlayerPawn + fallbackOffsets.m_vecOrigin, localPos);
+                ReadMemory(hProcess, localPlayerPawn + g_offsets.m_vecOrigin, localPos);
             }
         }
         
@@ -879,8 +1054,8 @@ int main() {
             vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
             players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
         } else {
-            vm = GetViewMatrixFromMemory(hProcess, clientBase, fallbackOffsets.dwViewMatrix);
-            players = GetPlayers(hProcess, clientBase, fallbackOffsets, localPlayer);
+            vm = GetViewMatrixFromMemory(hProcess, clientBase, g_offsets.dwViewMatrix);
+            players = GetPlayers(hProcess, clientBase, g_offsets, localPlayer);
         }
         
         // ============================================
