@@ -559,47 +559,59 @@ PlayerInfo ReadPlayerInfo(HANDLE hProcess, uintptr_t entity, const Offsets& offs
 // GET PLAYERS
 // ============================================
 
-std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets, 
+// CGameEntitySystem::m_EntityPtrArray (смещение 0x10) — это НЕ плоский массив
+// сущностей, а массив указателей на чанки по 512 (0x200) сущностей. Внутри
+// чанка сущности идут структурами CEntityIdentity размером 0x78 (120) байт,
+// а указатель на саму сущность (m_pInstance) лежит по смещению 0x0 такой структуры.
+constexpr int ENTITIES_PER_CHUNK = 512;      // 0x200
+constexpr int ENTITY_IDENTITY_SIZE = 0x78;   // 120 байт
+
+uintptr_t GetEntityByIndex(HANDLE hProcess, uintptr_t entitySystem, int index) {
+    int chunkIndex = index / ENTITIES_PER_CHUNK; // index >> 9
+    int entryIndex = index % ENTITIES_PER_CHUNK; // index & 0x1FF
+
+    uintptr_t chunkPtr = 0;
+    if (!ReadMemory(hProcess, entitySystem + 0x10 + chunkIndex * 0x8, chunkPtr) || !IsValidAddress(chunkPtr)) {
+        return 0;
+    }
+
+    uintptr_t entity = 0;
+    if (!ReadMemory(hProcess, chunkPtr + entryIndex * ENTITY_IDENTITY_SIZE, entity)) {
+        return 0;
+    }
+
+    return entity;
+}
+
+std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offsets offsets,
                                    uintptr_t localPlayerPawn) {
     std::vector<PlayerInfo> players;
-    
+
     // ============================================
     // СПОСОБ 1: ЧЕРЕЗ dwGameEntitySystem (НОВЫЙ)
     // ============================================
     uintptr_t entitySystem = 0;
     if (ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem) && IsValidAddress(entitySystem)) {
-        
+
         int highestIndex = 0;
         if (offsets.dwGameEntitySystem_highestEntityIndex != 0) {
             ReadMemory(hProcess, entitySystem + offsets.dwGameEntitySystem_highestEntityIndex, highestIndex);
         } else {
             ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);
         }
-        
+
         for (int i = 0; i < highestIndex && i < 10000; i++) {
-            uintptr_t listEntry = 0;
-            if (!ReadMemory(hProcess, entitySystem + 0x10 + i * 0x8, listEntry)) {
-                continue;
-            }
-            
-            if (!IsValidAddress(listEntry)) {
-                continue;
-            }
-            
-            uintptr_t entity = 0;
-            if (!ReadMemory(hProcess, listEntry + 0x0, entity)) {
-                continue;
-            }
-            
+            uintptr_t entity = GetEntityByIndex(hProcess, entitySystem, i);
+
             if (!IsValidAddress(entity)) {
                 continue;
             }
-            
+
             // Пропускаем локального игрока
             if (entity == localPlayerPawn) {
                 continue;
             }
-            
+
             // Проверяем, является ли сущность игроком
             if (IsPlayerEntity(hProcess, entity, offsets)) {
                 PlayerInfo player = ReadPlayerInfo(hProcess, entity, offsets);
