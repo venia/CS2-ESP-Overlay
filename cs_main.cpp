@@ -591,6 +591,9 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
     // СПОСОБ 1: ЧЕРЕЗ dwGameEntitySystem (НОВЫЙ)
     // ============================================
     uintptr_t entitySystem = 0;
+    int dbg_validEntities = 0;
+    int dbg_rawEntities = 0;
+    int dbg_highestIndex = -1;
     if (ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem) && IsValidAddress(entitySystem)) {
 
         int highestIndex = 0;
@@ -599,6 +602,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
         } else {
             ReadMemory(hProcess, entitySystem + 0x2090, highestIndex);
         }
+        dbg_highestIndex = highestIndex;
 
         for (int i = 0; i < highestIndex && i < 10000; i++) {
             uintptr_t entity = GetEntityByIndex(hProcess, entitySystem, i);
@@ -606,6 +610,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
             if (!IsValidAddress(entity)) {
                 continue;
             }
+            dbg_rawEntities++;
 
             // Пропускаем локального игрока
             if (entity == localPlayerPawn) {
@@ -614,12 +619,21 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
 
             // Проверяем, является ли сущность игроком
             if (IsPlayerEntity(hProcess, entity, offsets)) {
+                dbg_validEntities++;
                 PlayerInfo player = ReadPlayerInfo(hProcess, entity, offsets);
                 if (player.isAlive) {
                     players.push_back(player);
                 }
             }
         }
+    }
+
+    static int dbgCount = 0;
+    if (dbgCount++ % 60 == 0) {
+        std::cout << "[DEBUG] entitySystem=0x" << std::hex << entitySystem << std::dec
+                  << " highestIndex=" << dbg_highestIndex
+                  << " rawValidEntities=" << dbg_rawEntities
+                  << " passedPlayerCheck=" << dbg_validEntities << std::endl;
     }
     
     // ============================================
