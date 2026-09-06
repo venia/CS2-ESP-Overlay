@@ -594,6 +594,11 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
     int dbg_validEntities = 0;
     int dbg_rawEntities = 0;
     int dbg_highestIndex = -1;
+
+    static int dbgCount = 0;
+    bool isDebugFrame = (dbgCount % 60 == 0);
+    int dbgPrinted = 0;
+
     if (ReadMemory(hProcess, clientBase + offsets.dwGameEntitySystem, entitySystem) && IsValidAddress(entitySystem)) {
 
         int highestIndex = 0;
@@ -617,6 +622,23 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
                 continue;
             }
 
+            if (isDebugFrame && dbgPrinted < 6) {
+                uintptr_t vtable = 0;
+                ReadMemory(hProcess, entity, vtable);
+                int rawHealth = 0, rawTeam = 0, rawLifeState = 0;
+                ReadMemory(hProcess, entity + offsets.m_iHealth, rawHealth);
+                ReadMemory(hProcess, entity + offsets.m_iTeamNum, rawTeam);
+                ReadMemory(hProcess, entity + 0x354, rawLifeState);
+                std::cout << "[DEBUG]   idx=" << i
+                          << " entity=0x" << std::hex << entity
+                          << " vtable=0x" << vtable << std::dec
+                          << " (vtable-clientBase=0x" << std::hex << (vtable - clientBase) << std::dec << ")"
+                          << " health=" << rawHealth
+                          << " team=" << rawTeam
+                          << " lifeState=" << rawLifeState << std::endl;
+                dbgPrinted++;
+            }
+
             // Проверяем, является ли сущность игроком
             if (IsPlayerEntity(hProcess, entity, offsets)) {
                 dbg_validEntities++;
@@ -628,13 +650,14 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
         }
     }
 
-    static int dbgCount = 0;
-    if (dbgCount++ % 60 == 0) {
+    if (isDebugFrame) {
         std::cout << "[DEBUG] entitySystem=0x" << std::hex << entitySystem << std::dec
                   << " highestIndex=" << dbg_highestIndex
                   << " rawValidEntities=" << dbg_rawEntities
-                  << " passedPlayerCheck=" << dbg_validEntities << std::endl;
+                  << " passedPlayerCheck=" << dbg_validEntities
+                  << " totalPlayers=" << players.size() << std::endl;
     }
+    dbgCount++;
     
     // ============================================
     // СПОСОБ 2: ЧЕРЕЗ dwEntityList (СТАРЫЙ)
@@ -667,11 +690,6 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
                 }
             }
         }
-    }
-    
-    static int debugCount = 0;
-    if (debugCount++ % 60 == 0) {
-        std::cout << "[DEBUG] Total players found: " << players.size() << std::endl;
     }
     
     return players;
