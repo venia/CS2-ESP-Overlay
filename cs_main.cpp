@@ -594,6 +594,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
     int dbg_validEntities = 0;
     int dbg_rawEntities = 0;
     int dbg_highestIndex = -1;
+    int dbg_localFoundIdx = -1;
 
     static int dbgCount = 0;
     bool isDebugFrame = (dbgCount % 60 == 0);
@@ -617,8 +618,9 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
             }
             dbg_rawEntities++;
 
-            // Пропускаем локального игрока
+            // Пропускаем локального игрока (но фиксируем, на каком индексе он найден)
             if (entity == localPlayerPawn) {
+                dbg_localFoundIdx = i;
                 continue;
             }
 
@@ -655,7 +657,9 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
                   << " highestIndex=" << dbg_highestIndex
                   << " rawValidEntities=" << dbg_rawEntities
                   << " passedPlayerCheck=" << dbg_validEntities
-                  << " totalPlayers=" << players.size() << std::endl;
+                  << " totalPlayers=" << players.size()
+                  << " localPlayerPawn=0x" << std::hex << localPlayerPawn << std::dec
+                  << " localFoundAtIdx=" << dbg_localFoundIdx << std::endl;
     }
     dbgCount++;
     
