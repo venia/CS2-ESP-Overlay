@@ -622,7 +622,7 @@ std::vector<PlayerInfo> GetPlayers(HANDLE hProcess, uintptr_t clientBase, Offset
                 continue;
             }
 
-            if (isDebugFrame && dbgPrinted < 6) {
+            if (isDebugFrame && dbgPrinted < 60) {
                 uintptr_t vtable = 0;
                 ReadMemory(hProcess, entity, vtable);
                 int rawHealth = 0, rawTeam = 0, rawLifeState = 0;
